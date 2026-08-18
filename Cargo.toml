@@ -3,6 +3,11 @@ name = "usage-bar"
 version = "0.1.2"
 edition = "2024"
 
+# installed/invoked as `ub`; package & crate keep the `usage-bar` name
+[[bin]]
+name = "ub"
+path = "src/main.rs"
+
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
 crossterm = "0.29.0"

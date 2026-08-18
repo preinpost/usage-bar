@@ -53,15 +53,15 @@ jobs:
       # macOS refuses to run unsigned binaries — ad-hoc signature
       - name: Ad-hoc codesign (macOS)
         if: runner.os == 'macOS'
-        run: codesign --force -s - "target/${{ matrix.target }}/release/usage-bar"
+        run: codesign --force -s - "target/${{ matrix.target }}/release/ub"
       - name: Package
         shell: bash
         run: |
           ext=""
           [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
-          cp "target/${{ matrix.target }}/release/usage-bar$ext" "usage-bar-${{ matrix.name }}$ext"
+          cp "target/${{ matrix.target }}/release/ub$ext" "ub-${{ matrix.name }}$ext"
       - uses: actions/upload-artifact@v4
         with:
-          name: usage-bar-${{ matrix.name }}
-          path: usage-bar-${{ matrix.name }}*
+          name: ub-${{ matrix.name }}
+          path: ub-${{ matrix.name }}*
           if-no-files-found: error
