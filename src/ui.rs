@@ -1327,6 +1327,22 @@ impl Keymap {
     fn section_for_digit(&self, d: char) -> Option<Section> {
         digit_idx(d).and_then(|i| self.slots[i])
     }
+    /// sections in dashboard order: bound ones follow their digit (1..0),
+    /// unbound ones trail in registration order
+    fn ordered_sections(&self) -> Vec<Section> {
+        let mut out: Vec<Section> = Vec::with_capacity(Section::ALL.len());
+        for slot in self.slots.iter() {
+            if let Some(s) = slot {
+                out.push(*s);
+            }
+        }
+        for s in Section::ALL {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
+    }
     /// bind a digit to a section, releasing the digit's previous owner and
     /// the section's previous key
     fn assign(&mut self, d: char, s: Section) {
@@ -1633,445 +1649,463 @@ fn build_body(
         return body;
     }
 
-    // ---- Claude Code
-    if show_all || c_active {
-        if !compact {
-            body.divider(width);
-        }
-        let c = &snap.claude;
-        let has_win = c.tokens.total() > 0 || c.msgs > 0;
-        let stats = if has_win {
-            let mut s = format!(
-                "in {} · out {} · cache {}",
-                fmt_tok(c.tokens.input),
-                fmt_tok(c.tokens.output),
-                fmt_tok(c.tokens.cache_read + c.tokens.cache_write),
-            );
-            if c.msgs > 0 {
-                s.push_str(&format!(
-                    " · {} msg{}",
-                    c.msgs,
-                    if c.msgs == 1 { "" } else { "s" }
-                ));
-            }
-            s
-        } else if let Some(last) = c.last_activity_secs {
-            format!(
-                "no usage today · last {}",
-                crate::model::fmt_last_activity(Some(last))
-            )
-        } else {
-            "no data yet".into()
-        };
-        let open = !folded.collapsed(Section::Claude);
-        body.push_section(
-            Section::Claude,
-            section_line(
-                Section::Claude,
-                keymap.key_of(Section::Claude),
-                open,
-                &stats,
-                &fmt_money(c.cost),
-                width,
-            ),
-        );
-        if open && has_win {
-            if compact {
-                body.push(compact_budget_line(
-                    "budget",
-                    c.tokens.total(),
-                    cfg.claude_budget,
-                    width,
-                ));
-            } else {
-                body.push(budget_line(
-                    "budget",
-                    c.tokens.total(),
-                    cfg.claude_budget,
-                    width,
-                ));
-            }
-            if !compact {
-                for item in c.items.iter().take(2) {
-                    body.push(item_line(&item.name, item.tokens.total(), width));
-                }
-            }
-        }
-    }
-
-    // ---- Codex
-    if show_all || x_active {
-        if !compact {
-            body.divider(width);
-        }
-        let x = &snap.codex;
-        let token_s = if x.has_token_data {
-            format!(
-                "in {} · out {} · cache {}",
-                fmt_tok(x.tokens.input),
-                fmt_tok(x.tokens.output),
-                fmt_tok(x.tokens.cache_read + x.tokens.cache_write),
-            )
-        } else if x.sessions > 0 || x.turns > 0 {
-            format!(
-                "{} sessions · {} turns (no token data)",
-                x.sessions, x.turns
-            )
-        } else if let Some(last) = x.last_activity_secs {
-            format!(
-                "no usage today · last {}",
-                crate::model::fmt_last_activity(Some(last))
-            )
-        } else {
-            "no data yet".into()
-        };
-        let open = !folded.collapsed(Section::Codex);
-        body.push_section(
-            Section::Codex,
-            section_line(
-                Section::Codex,
-                keymap.key_of(Section::Codex),
-                open,
-                &token_s,
-                &fmt_money(x.cost),
-                width,
-            ),
-        );
-    }
-
-    // ---- OpenCode
-    if let Some(o) = &snap.opencode {
-        if show_all || o_active {
-            if !compact {
-                body.divider(width);
-            }
-            let has_win = o.sessions > 0 || o.tokens.total() > 0;
-            let stats = if has_win {
-                let mut s = format!(
-                    "in {} · out {} · cache {}",
-                    fmt_tok(o.tokens.input),
-                    fmt_tok(o.tokens.output),
-                    fmt_tok(o.tokens.cache_read + o.tokens.cache_write),
-                );
-                if o.sessions > 0 {
-                    s.push_str(&format!(
-                        " · {} session{}",
-                        o.sessions,
-                        if o.sessions == 1 { "" } else { "s" }
-                    ));
-                }
-                s
-            } else if let Some(last) = o.last_activity_secs {
-                format!(
-                    "no usage today · last {}",
-                    crate::model::fmt_last_activity(Some(last))
-                )
-            } else {
-                "no data yet".into()
-            };
-            let open = !folded.collapsed(Section::OpenCode);
-            body.push_section(
-                Section::OpenCode,
-                section_line(
-                    Section::OpenCode,
-                    keymap.key_of(Section::OpenCode),
-                    open,
-                    &stats,
-                    &fmt_money(o.cost),
-                    width,
-                ),
-            );
-            if open && has_win {
-                if compact {
-                    body.push(compact_budget_line(
-                        "budget",
-                        o.tokens.total(),
-                        cfg.opencode_budget,
-                        width,
-                    ));
-                } else {
-                    body.push(budget_line(
-                        "budget",
-                        o.tokens.total(),
-                        cfg.opencode_budget,
-                        width,
-                    ));
-                }
-                if !compact {
-                    for item in o.items.iter().take(1) {
-                        body.push(item_line(&item.name, item.tokens.total(), width));
+    // render sections in fold-key order: bound digits first (1..0), then
+    // unbound sections in registration order
+    for sec in keymap.ordered_sections() {
+        let open = !folded.collapsed(sec);
+        match sec {
+            Section::Claude => {
+                if show_all || c_active {
+                    if !compact {
+                        body.divider(width);
                     }
-                }
-            }
-        }
-    }
-
-    // ---- OpenCode Go (official quota API)
-    if show_all || ogo_active {
-        if !compact {
-            body.divider(width);
-        }
-        let ogo = &snap.opencode_go;
-        if ogo.needs_key {
-            body.msg(
-                "OpenCode Go — no key (run `opencode login`, or set OPENCODE_API_KEY)".into(),
-                Color::DarkGray,
-                false,
-            );
-        } else if let Some(e) = &ogo.error {
-            body.msg(format!("OpenCode Go — {e}"), Color::Red, false);
-        } else {
-            let mut tail = String::new();
-            if let Some(w) = &ogo.rolling {
-                if w.rate_limited() {
-                    tail = "limit reached".into();
-                } else {
-                    tail = format!("rolling {}%", w.percent);
-                }
-            }
-            let open = !folded.collapsed(Section::OpenCodeGo);
-            body.push_section(
-                Section::OpenCodeGo,
-                section_line(
-                    Section::OpenCodeGo,
-                    keymap.key_of(Section::OpenCodeGo),
-                    open,
-                    "official quota",
-                    &tail,
-                    width,
-                ),
-            );
-            if open {
-                for (label, w) in [
-                    ("rolling", &ogo.rolling),
-                    ("weekly", &ogo.weekly),
-                    ("monthly", &ogo.monthly),
-                ] {
-                    let Some(w) = w else { continue };
-                    let frac = w.percent as f64 / 100.0;
-                    let resets =
-                        crate::providers::opencode_go::format_resets_at(w.resets_at.as_deref());
-                    let rtail = if w.rate_limited() {
-                        format!("LIMIT · resets {resets}")
+                    let c = &snap.claude;
+                    let has_win = c.tokens.total() > 0 || c.msgs > 0;
+                    let stats = if has_win {
+                        let mut s = format!(
+                            "in {} · out {} · cache {}",
+                            fmt_tok(c.tokens.input),
+                            fmt_tok(c.tokens.output),
+                            fmt_tok(c.tokens.cache_read + c.tokens.cache_write),
+                        );
+                        if c.msgs > 0 {
+                            s.push_str(&format!(
+                                " · {} msg{}",
+                                c.msgs,
+                                if c.msgs == 1 { "" } else { "s" }
+                            ));
+                        }
+                        s
+                    } else if let Some(last) = c.last_activity_secs {
+                        format!(
+                            "no usage today · last {}",
+                            crate::model::fmt_last_activity(Some(last))
+                        )
                     } else {
-                        format!("resets {resets}")
+                        "no data yet".into()
                     };
-                    if compact {
-                        body.push(compact_meter(label, frac, rtail, width));
-                    } else {
-                        let right = if w.rate_limited() {
-                            format!("100% · {rtail}")
+                    body.push_section(
+                        Section::Claude,
+                        section_line(
+                            Section::Claude,
+                            keymap.key_of(Section::Claude),
+                            open,
+                            &stats,
+                            &fmt_money(c.cost),
+                            width,
+                        ),
+                    );
+                    if open && has_win {
+                        if compact {
+                            body.push(compact_budget_line(
+                                "budget",
+                                c.tokens.total(),
+                                cfg.claude_budget,
+                                width,
+                            ));
                         } else {
-                            format!("{}% · {rtail}", w.percent)
-                        };
-                        body.push(meter_line(label, frac, right, width));
+                            body.push(budget_line(
+                                "budget",
+                                c.tokens.total(),
+                                cfg.claude_budget,
+                                width,
+                            ));
+                        }
+                        if !compact {
+                            for item in c.items.iter().take(2) {
+                                body.push(item_line(&item.name, item.tokens.total(), width));
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
-
-    // ---- Copilot
-    if show_all || cp_active {
-        if !compact {
-            body.divider(width);
-        }
-        match &snap.copilot {
-            Status::Ok(cp) => {
-                let meta = format!("{} · reset {}", cp.plan, cp.reset);
-                let open = !folded.collapsed(Section::Copilot);
-                body.push_section(
-                    Section::Copilot,
-                    section_line(
-                        Section::Copilot,
-                        keymap.key_of(Section::Copilot),
-                        open,
-                        "",
-                        &meta,
-                        width,
-                    ),
-                );
-                if open {
-                    // only the quotas that actually run out (AI credits on
-                    // token-based plans); unlimited chat/completions are skipped.
-                    for q in cp
-                        .quotas
-                        .iter()
-                        .filter(|q| !q.unlimited && q.used_pct.is_some())
-                    {
-                        let frac = q.used_pct.unwrap() as f64 / 100.0;
-                        let right = if q.entitlement > 0 {
+            Section::Codex => {
+                if show_all || x_active {
+                    if !compact {
+                        body.divider(width);
+                    }
+                    let x = &snap.codex;
+                    let token_s = if x.has_token_data {
+                        format!(
+                            "in {} · out {} · cache {}",
+                            fmt_tok(x.tokens.input),
+                            fmt_tok(x.tokens.output),
+                            fmt_tok(x.tokens.cache_read + x.tokens.cache_write),
+                        )
+                    } else if x.sessions > 0 || x.turns > 0 {
+                        format!(
+                            "{} sessions · {} turns (no token data)",
+                            x.sessions, x.turns
+                        )
+                    } else if let Some(last) = x.last_activity_secs {
+                        format!(
+                            "no usage today · last {}",
+                            crate::model::fmt_last_activity(Some(last))
+                        )
+                    } else {
+                        "no data yet".into()
+                    };
+                    body.push_section(
+                        Section::Codex,
+                        section_line(
+                            Section::Codex,
+                            keymap.key_of(Section::Codex),
+                            open,
+                            &token_s,
+                            &fmt_money(x.cost),
+                            width,
+                        ),
+                    );
+                }
+            }
+            Section::OpenCode => {
+                if let Some(o) = &snap.opencode {
+                    if show_all || o_active {
+                        if !compact {
+                            body.divider(width);
+                        }
+                        let has_win = o.sessions > 0 || o.tokens.total() > 0;
+                        let stats = if has_win {
+                            let mut s = format!(
+                                "in {} · out {} · cache {}",
+                                fmt_tok(o.tokens.input),
+                                fmt_tok(o.tokens.output),
+                                fmt_tok(o.tokens.cache_read + o.tokens.cache_write),
+                            );
+                            if o.sessions > 0 {
+                                s.push_str(&format!(
+                                    " · {} session{}",
+                                    o.sessions,
+                                    if o.sessions == 1 { "" } else { "s" }
+                                ));
+                            }
+                            s
+                        } else if let Some(last) = o.last_activity_secs {
                             format!(
-                                "{:.0}% · {} / {}",
-                                frac * 100.0,
-                                crate::model::fmt_int(q.used),
-                                crate::model::fmt_int(q.entitlement)
+                                "no usage today · last {}",
+                                crate::model::fmt_last_activity(Some(last))
                             )
                         } else {
-                            format!("{:.0}%", frac * 100.0)
+                            "no data yet".into()
                         };
-                        if compact {
-                            body.push(compact_meter(&q.name, frac, right, width));
-                        } else {
-                            body.push(meter_line(&q.name, frac, right, width));
+                        body.push_section(
+                            Section::OpenCode,
+                            section_line(
+                                Section::OpenCode,
+                                keymap.key_of(Section::OpenCode),
+                                open,
+                                &stats,
+                                &fmt_money(o.cost),
+                                width,
+                            ),
+                        );
+                        if open && has_win {
+                            if compact {
+                                body.push(compact_budget_line(
+                                    "budget",
+                                    o.tokens.total(),
+                                    cfg.opencode_budget,
+                                    width,
+                                ));
+                            } else {
+                                body.push(budget_line(
+                                    "budget",
+                                    o.tokens.total(),
+                                    cfg.opencode_budget,
+                                    width,
+                                ));
+                            }
+                            if !compact {
+                                for item in o.items.iter().take(1) {
+                                    body.push(item_line(&item.name, item.tokens.total(), width));
+                                }
+                            }
                         }
                     }
                 }
             }
-            other => {
-                body.msg(format!("Copilot — {other}"), Color::DarkGray, false);
-            }
-        }
-    }
-
-    // ---- Grok
-    if show_all || g_active {
-        // figure out what (if anything) this section shows before drawing a
-        // divider, so a status with no displayable line can't leave a stray bar
-        let line: Option<Line<'static>> = if snap.grok.needs_login {
-            Some(Line::from(Span::styled(
-                "Grok — needs 'grok login' or GROK_OAUTH_TOKEN",
-                Style::default().fg(Color::DarkGray),
-            )))
-        } else if let Some(e) = &snap.grok.error {
-            Some(Line::from(Span::styled(
-                format!("Grok — error ({e})"),
-                Style::default().fg(Color::Red),
-            )))
-        } else if let Some(p) = snap.grok.used_pct {
-            let resets = snap.grok.resets_at.as_deref().unwrap_or("—");
-            let open = !folded.collapsed(Section::Grok);
-            Some(section_line(
-                Section::Grok,
-                keymap.key_of(Section::Grok),
-                open,
-                &format!("credits {p:.0}% used · resets {resets}"),
-                "",
-                width,
-            ))
-        } else {
-            None
-        };
-        if let Some(ref l) = line {
-            if !compact {
-                body.divider(width);
-            }
-            body.push(l.clone());
-        }
-        if !compact && snap.grok.local_sessions > 0 && line.is_some() {
-            body.push(item_line(
-                &format!("grok local: {} sessions", snap.grok.local_sessions),
-                snap.grok.local_tokens,
-                width,
-            ));
-        }
-    }
-    // ---- OpenRouter
-    if show_all || or_active {
-        if !compact {
-            body.divider(width);
-        }
-        let or = &snap.openrouter;
-        if let Some(e) = &or.error {
-            body.msg(format!("OpenRouter — error ({e})"), Color::Red, false);
-        } else {
-            let bal = fmt_money(or.balance_usd);
-            let tail = match or.key_limit_usd {
-                Some(l) => format!("limit {}", fmt_money(l)),
-                None => String::new(),
-            };
-            let open = !folded.collapsed(Section::OpenRouter);
-            body.push_section(
-                Section::OpenRouter,
-                section_line(
-                    Section::OpenRouter,
-                    keymap.key_of(Section::OpenRouter),
-                    open,
-                    &format!("credits {bal}"),
-                    &tail,
-                    width,
-                ),
-            );
-            if open {
-                // Credits usage bar (how much of the purchased credits is spent)
-                if or.total_credits_usd > 0.0 {
-                    let frac = (or.total_usage_usd / or.total_credits_usd).clamp(0.0, 1.0);
-                    let right = format!(
-                        "{:.0}% · {} used · {} left",
-                        frac * 100.0,
-                        fmt_money(or.total_usage_usd),
-                        fmt_money(or.balance_usd),
-                    );
-                    if compact {
-                        body.push(compact_meter("credits", frac, right, width));
+            Section::OpenCodeGo => {
+                if show_all || ogo_active {
+                    if !compact {
+                        body.divider(width);
+                    }
+                    let ogo = &snap.opencode_go;
+                    if ogo.needs_key {
+                        body.msg(
+                            "OpenCode Go — no key (run `opencode login`, or set OPENCODE_API_KEY)"
+                                .into(),
+                            Color::DarkGray,
+                            false,
+                        );
+                    } else if let Some(e) = &ogo.error {
+                        body.msg(format!("OpenCode Go — {e}"), Color::Red, false);
                     } else {
-                        body.push(meter_line("credits", frac, right, width));
-                    }
-                }
-                // API-key spending meter when a key limit is configured
-                if let (Some(p), Some(limit)) = (or.used_pct, or.key_limit_usd) {
-                    let used = or.key_used_usd.unwrap_or(0.0);
-                    let right = format!(
-                        "{:.0}% · {} / {}",
-                        p as f64,
-                        fmt_money(used),
-                        fmt_money(limit)
-                    );
-                    if compact {
-                        body.push(compact_meter("key budget", p as f64 / 100.0, right, width));
-                    } else {
-                        body.push(meter_line("key budget", p as f64 / 100.0, right, width));
-                    }
-                }
-                if !compact {
-                    // daily / weekly / monthly key spend (whenever the API reports it)
-                    if or.usage_today > 0.0 || or.usage_week > 0.0 || or.usage_month > 0.0 {
-                        body.msg(
-                            format!(
-                                "  spend  today {} · week {} · month {}",
-                                fmt_money(or.usage_today),
-                                fmt_money(or.usage_week),
-                                fmt_money(or.usage_month),
-                            ),
-                            Color::DarkGray,
-                            false,
-                        );
-                    } else if or.key_limit_usd.is_none() && or.total_usage_usd > 0.0 {
-                        // hint only when there IS usage but no per-period data (limit off)
-                        body.msg(
-                            "  hint: set a key spending limit to see today/week/month spend".into(),
-                            Color::DarkGray,
-                            false,
-                        );
-                    }
-                    // per-model usage from the web dashboard (or_sync cache)
-                    if let Some(u) = &snap.or_usage {
-                        let now_unix = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        let stale = crate::openrouter::is_stale(u, now_unix);
-                        body.msg(
-                            format!(
-                                "  month {}{}",
-                                fmt_money(u.month_total),
-                                if stale { " · stale — press R" } else { "" },
-                            ),
-                            Color::DarkGray,
-                            false,
-                        );
-                        for m in u.month_models.iter().take(3) {
-                            body.push(model_line(&m.label, m.tokens, m.cost, width));
+                        let mut tail = String::new();
+                        if let Some(w) = &ogo.rolling {
+                            if w.rate_limited() {
+                                tail = "limit reached".into();
+                            } else {
+                                tail = format!("rolling {}%", w.percent);
+                            }
                         }
-                        if !u.today_models.is_empty() {
-                            body.msg(
-                                format!("  today {}", fmt_money(u.today_total)),
-                                Color::DarkGray,
-                                false,
+                        body.push_section(
+                            Section::OpenCodeGo,
+                            section_line(
+                                Section::OpenCodeGo,
+                                keymap.key_of(Section::OpenCodeGo),
+                                open,
+                                "official quota",
+                                &tail,
+                                width,
+                            ),
+                        );
+                        if open {
+                            for (label, w) in [
+                                ("rolling", &ogo.rolling),
+                                ("weekly", &ogo.weekly),
+                                ("monthly", &ogo.monthly),
+                            ] {
+                                let Some(w) = w else { continue };
+                                let frac = w.percent as f64 / 100.0;
+                                let resets = crate::providers::opencode_go::format_resets_at(
+                                    w.resets_at.as_deref(),
+                                );
+                                let rtail = if w.rate_limited() {
+                                    format!("LIMIT · resets {resets}")
+                                } else {
+                                    format!("resets {resets}")
+                                };
+                                if compact {
+                                    body.push(compact_meter(label, frac, rtail, width));
+                                } else {
+                                    let right = if w.rate_limited() {
+                                        format!("100% · {rtail}")
+                                    } else {
+                                        format!("{}% · {rtail}", w.percent)
+                                    };
+                                    body.push(meter_line(label, frac, right, width));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Section::Copilot => {
+                if show_all || cp_active {
+                    if !compact {
+                        body.divider(width);
+                    }
+                    match &snap.copilot {
+                        Status::Ok(cp) => {
+                            let meta = format!("{} · reset {}", cp.plan, cp.reset);
+                            body.push_section(
+                                Section::Copilot,
+                                section_line(
+                                    Section::Copilot,
+                                    keymap.key_of(Section::Copilot),
+                                    open,
+                                    "",
+                                    &meta,
+                                    width,
+                                ),
                             );
+                            if open {
+                                // only the quotas that actually run out (AI credits on
+                                // token-based plans); unlimited chat/completions are skipped.
+                                for q in cp
+                                    .quotas
+                                    .iter()
+                                    .filter(|q| !q.unlimited && q.used_pct.is_some())
+                                {
+                                    let frac = q.used_pct.unwrap() as f64 / 100.0;
+                                    let right = if q.entitlement > 0 {
+                                        format!(
+                                            "{:.0}% · {} / {}",
+                                            frac * 100.0,
+                                            crate::model::fmt_int(q.used),
+                                            crate::model::fmt_int(q.entitlement)
+                                        )
+                                    } else {
+                                        format!("{:.0}%", frac * 100.0)
+                                    };
+                                    if compact {
+                                        body.push(compact_meter(&q.name, frac, right, width));
+                                    } else {
+                                        body.push(meter_line(&q.name, frac, right, width));
+                                    }
+                                }
+                            }
                         }
-                        for m in u.today_models.iter().take(2) {
-                            body.push(model_line(&m.label, m.tokens, m.cost, width));
+                        other => {
+                            body.msg(format!("Copilot — {other}"), Color::DarkGray, false);
+                        }
+                    }
+                }
+            }
+            Section::Grok => {
+                if show_all || g_active {
+                    // figure out what (if anything) this section shows before drawing a
+                    // divider, so a status with no displayable line can't leave a stray bar
+                    let line: Option<Line<'static>> = if snap.grok.needs_login {
+                        Some(Line::from(Span::styled(
+                            "Grok — needs 'grok login' or GROK_OAUTH_TOKEN",
+                            Style::default().fg(Color::DarkGray),
+                        )))
+                    } else if let Some(e) = &snap.grok.error {
+                        Some(Line::from(Span::styled(
+                            format!("Grok — error ({e})"),
+                            Style::default().fg(Color::Red),
+                        )))
+                    } else if let Some(p) = snap.grok.used_pct {
+                        let resets = snap.grok.resets_at.as_deref().unwrap_or("—");
+                        Some(section_line(
+                            Section::Grok,
+                            keymap.key_of(Section::Grok),
+                            open,
+                            &format!("credits {p:.0}% used · resets {resets}"),
+                            "",
+                            width,
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(ref l) = line {
+                        if !compact {
+                            body.divider(width);
+                        }
+                        body.push(l.clone());
+                    }
+                    if !compact && snap.grok.local_sessions > 0 && line.is_some() {
+                        body.push(item_line(
+                            &format!("grok local: {} sessions", snap.grok.local_sessions),
+                            snap.grok.local_tokens,
+                            width,
+                        ));
+                    }
+                }
+            }
+            Section::OpenRouter => {
+                if show_all || or_active {
+                    if !compact {
+                        body.divider(width);
+                    }
+                    let or = &snap.openrouter;
+                    if let Some(e) = &or.error {
+                        body.msg(format!("OpenRouter — error ({e})"), Color::Red, false);
+                    } else {
+                        let bal = fmt_money(or.balance_usd);
+                        let tail = match or.key_limit_usd {
+                            Some(l) => format!("limit {}", fmt_money(l)),
+                            None => String::new(),
+                        };
+                        body.push_section(
+                            Section::OpenRouter,
+                            section_line(
+                                Section::OpenRouter,
+                                keymap.key_of(Section::OpenRouter),
+                                open,
+                                &format!("credits {bal}"),
+                                &tail,
+                                width,
+                            ),
+                        );
+                        if open {
+                            // Credits usage bar (how much of the purchased credits is spent)
+                            if or.total_credits_usd > 0.0 {
+                                let frac =
+                                    (or.total_usage_usd / or.total_credits_usd).clamp(0.0, 1.0);
+                                let right = format!(
+                                    "{:.0}% · {} used · {} left",
+                                    frac * 100.0,
+                                    fmt_money(or.total_usage_usd),
+                                    fmt_money(or.balance_usd),
+                                );
+                                if compact {
+                                    body.push(compact_meter("credits", frac, right, width));
+                                } else {
+                                    body.push(meter_line("credits", frac, right, width));
+                                }
+                            }
+                            // API-key spending meter when a key limit is configured
+                            if let (Some(p), Some(limit)) = (or.used_pct, or.key_limit_usd) {
+                                let used = or.key_used_usd.unwrap_or(0.0);
+                                let right = format!(
+                                    "{:.0}% · {} / {}",
+                                    p as f64,
+                                    fmt_money(used),
+                                    fmt_money(limit)
+                                );
+                                if compact {
+                                    body.push(compact_meter(
+                                        "key budget",
+                                        p as f64 / 100.0,
+                                        right,
+                                        width,
+                                    ));
+                                } else {
+                                    body.push(meter_line(
+                                        "key budget",
+                                        p as f64 / 100.0,
+                                        right,
+                                        width,
+                                    ));
+                                }
+                            }
+                            if !compact {
+                                // daily / weekly / monthly key spend (whenever the API reports it)
+                                if or.usage_today > 0.0
+                                    || or.usage_week > 0.0
+                                    || or.usage_month > 0.0
+                                {
+                                    body.msg(
+                                        format!(
+                                            "  spend  today {} · week {} · month {}",
+                                            fmt_money(or.usage_today),
+                                            fmt_money(or.usage_week),
+                                            fmt_money(or.usage_month),
+                                        ),
+                                        Color::DarkGray,
+                                        false,
+                                    );
+                                } else if or.key_limit_usd.is_none() && or.total_usage_usd > 0.0 {
+                                    // hint only when there IS usage but no per-period data (limit off)
+                                    body.msg(
+                                        "  hint: set a key spending limit to see today/week/month spend".into(),
+                                        Color::DarkGray,
+                                        false,
+                                    );
+                                }
+                                // per-model usage from the web dashboard (or_sync cache)
+                                if let Some(u) = &snap.or_usage {
+                                    let now_unix = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0);
+                                    let stale = crate::openrouter::is_stale(u, now_unix);
+                                    body.msg(
+                                        format!(
+                                            "  month {}{}",
+                                            fmt_money(u.month_total),
+                                            if stale { " · stale — press R" } else { "" },
+                                        ),
+                                        Color::DarkGray,
+                                        false,
+                                    );
+                                    for m in u.month_models.iter().take(3) {
+                                        body.push(model_line(&m.label, m.tokens, m.cost, width));
+                                    }
+                                    if !u.today_models.is_empty() {
+                                        body.msg(
+                                            format!("  today {}", fmt_money(u.today_total)),
+                                            Color::DarkGray,
+                                            false,
+                                        );
+                                    }
+                                    for m in u.today_models.iter().take(2) {
+                                        body.push(model_line(&m.label, m.tokens, m.cost, width));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2580,6 +2614,66 @@ mod tests {
         // clearing a section frees its digit
         km.clear(Section::OpenRouter);
         assert_eq!(km.section_for_digit('0'), None);
+    }
+
+    #[test]
+    fn sections_render_in_fold_key_order() {
+        // default keymap: registration order (Claude first)
+        let km = Keymap::default();
+        assert_eq!(
+            km.ordered_sections(),
+            vec![
+                Section::Claude,
+                Section::Codex,
+                Section::OpenCode,
+                Section::OpenCodeGo,
+                Section::Copilot,
+                Section::Grok,
+                Section::OpenRouter,
+            ]
+        );
+
+        // rebind: Copilot -> '1', OpenRouter -> '2', Claude -> '9'. Assigning
+        // '1' frees Claude, '2' frees Codex; bound sections follow digit
+        // order (Copilot, OpenRouter, OpenCode, OpenCodeGo, Grok, Claude),
+        // unbound Codex trails last
+        let mut km = Keymap::default();
+        km.assign('1', Section::Copilot);
+        km.assign('2', Section::OpenRouter);
+        km.assign('9', Section::Claude);
+        assert_eq!(
+            km.ordered_sections(),
+            vec![
+                Section::Copilot,
+                Section::OpenRouter,
+                Section::OpenCode,
+                Section::OpenCodeGo,
+                Section::Grok,
+                Section::Claude, // bound to 9, after the lower digits
+                Section::Codex,  // unbound → registration-order tail
+            ]
+        );
+
+        // the dashboard body follows that order
+        let mut snap = Snapshot::default();
+        snap.claude.msgs = 1;
+        snap.claude.has_token_data = true;
+        snap.codex.sessions = 1;
+        snap.copilot = Status::Ok(crate::model::CopilotStatus {
+            plan: "business".into(),
+            reset: "x".into(),
+            login: String::new(),
+            quotas: Vec::new(),
+        });
+        snap.opencode_go.needs_key = true;
+        snap.openrouter.needs_key = true;
+        snap.grok.needs_login = true;
+        let cfg = crate::config::load();
+        let body = build_body(&cfg, &snap, CollapseState::default(), km, 120);
+        let order: Vec<Section> = body.sections.iter().filter_map(|s| *s).collect();
+        assert_eq!(order[0], Section::Copilot);
+        assert_eq!(order[1], Section::Claude);
+        assert_eq!(order[2], Section::Codex);
     }
 
     #[test]
