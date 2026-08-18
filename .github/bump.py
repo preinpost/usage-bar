@@ -69,14 +69,14 @@ def main():
     # git talks on stdout (e.g. `[master daf883d] release: v0.1.1`); keep the
     # captured script output to exactly the version number, so GITHUB_OUTPUT
     # never sees the commit summary
-    changed = bool(sh('git status --porcelain').strip())
+    changed = bool(sh(['git', 'status', '--porcelain']).strip())
     if changed:
         run(['git', 'add', 'Cargo.toml', 'Cargo.lock'])
         run(['git', '-c', 'user.name=usage-bar bot',
              '-c', 'user.email=actions@users.noreply.github.com',
              'commit', '-m', f'release: v{new}'])
     # idempotent: re-runs with the same version keep the existing tag
-    if sh(f'git rev-parse -q --verify refs/tags/v{new}') == '':
+    if sh(['git', 'rev-parse', '-q', '--verify', f'refs/tags/v{new}']) == '':
         run(['git', 'tag', f'v{new}'])
     if branch:
         run(['git', 'push', url, f'HEAD:refs/heads/{branch}'])
