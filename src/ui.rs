@@ -78,6 +78,8 @@ enum MenuEntry {
 struct ConnectMenu {
     items: Vec<MenuEntry>,
     selected: usize,
+    /// first item row visible in the scroll window (small screens)
+    scroll: usize,
 }
 
 enum Modal {
@@ -171,7 +173,7 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
             body_rect = b;
             footer_rect = foot;
             body = fresh;
-            modal_rect = match &modal {
+            modal_rect = match &mut modal {
                 Some(m) => draw_modal(f, rect, m),
                 None => None,
             };
@@ -228,6 +230,16 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                     }
                 }
                 Event::Mouse(m) => {
+                    // wheel over an open connect menu scrolls its item window
+                    if let Some(Modal::Menu(menu)) = &mut modal {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => menu.scroll = menu.scroll.saturating_sub(2),
+                            MouseEventKind::ScrollDown => {
+                                menu.scroll = menu.scroll.saturating_add(2)
+                            }
+                            _ => {}
+                        }
+                    }
                     // body scrolling + click-to-fold (only on the dashboard)
                     if modal.is_none() {
                         match m.kind {
@@ -249,8 +261,15 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                             _ => {}
                         }
                     }
+                    // visible item rows in the open connect menu (scroll window)
                     let menu_len = match &modal {
-                        Some(Modal::Menu(menu)) => Some(menu.items.len()),
+                        Some(Modal::Menu(menu)) => {
+                            let n = menu.items.len();
+                            let cap = modal_rect
+                                .map(|r| (r.height as usize).saturating_sub(7).max(1))
+                                .unwrap_or(n);
+                            Some(n.min(cap))
+                        }
                         _ => None,
                     };
                     match decide_mouse(&m, menu_len, modal_rect, &footer_rect) {
@@ -455,6 +474,7 @@ fn open_menu(snap: &Snapshot) -> Modal {
     };
     Modal::Menu(ConnectMenu {
         selected: 0,
+        scroll: 0,
         items: vec![
             MenuEntry::Provider(ProviderItem {
                 name: "GitHub Copilot",
@@ -587,10 +607,11 @@ fn login_fold(ls: &mut LoginState, now: Instant) -> bool {
 }
 
 /// Look up a connect-menu entry by index (for keyboard Enter + mouse clicks).
+/// `idx` is a visible-window index; the menu's scroll offset is applied here.
 /// Returns an owned clone so callers can mutate `modal` without a borrow fight.
 fn menu_entry_at(modal: &Option<Modal>, idx: usize) -> Option<MenuEntry> {
     match modal {
-        Some(Modal::Menu(menu)) => menu.items.get(idx).cloned(),
+        Some(Modal::Menu(menu)) => menu.items.get(menu.scroll + idx).cloned(),
         _ => None,
     }
 }
@@ -879,43 +900,68 @@ fn menu_hit(m: &crossterm::event::MouseEvent, mrect: Rect, n: usize) -> Option<u
     if idx < n { Some(idx) } else { None }
 }
 
-fn centered_rect(area: Rect, x_pct: u16, y_pct: u16) -> Rect {
-    let vert = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - y_pct) / 2),
-            Constraint::Percentage(y_pct),
-            Constraint::Percentage((100 - y_pct) / 2),
-        ])
-        .split(area);
-    let horiz = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - x_pct) / 2),
-            Constraint::Percentage(x_pct),
-            Constraint::Percentage((100 - x_pct) / 2),
-        ])
-        .split(vert[1]);
-    horiz[1]
+/// Clamp the menu's scroll window to keep `selected` visible.
+/// `cap` = number of item rows the modal can show (at least 1).
+fn clamp_menu(menu: &mut ConnectMenu, cap: usize) {
+    let n = menu.items.len();
+    let cap = cap.max(1);
+    if menu.selected >= n {
+        menu.selected = n.saturating_sub(1);
+    }
+    if menu.selected < menu.scroll {
+        menu.scroll = menu.selected;
+    }
+    if menu.selected >= menu.scroll + cap {
+        menu.scroll = menu.selected + 1 - cap;
+    }
 }
 
-fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) -> Option<Rect> {
+/// Width of the widest menu row (label + provider status), for sizing.
+fn menu_content_width(menu: &ConnectMenu) -> u16 {
+    let mut w = 0usize;
+    for it in &menu.items {
+        let len = match it {
+            MenuEntry::Provider(p) => 2 + p.name.len() + 1 + p.status.len(),
+            MenuEntry::Logout(k) => 2 + k.label().len(),
+        };
+        w = w.max(len);
+    }
+    (w + 2) as u16
+}
+
+/// Center a rect of explicit size in `area`, clamped to the available space.
+fn rect_centered(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width.saturating_sub(2)).max(20);
+    let h = h.min(area.height.saturating_sub(2)).max(3);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn draw_modal(f: &mut Frame, area: Rect, modal: &mut Modal) -> Option<Rect> {
     match modal {
         Modal::Menu(menu) => draw_connect_menu(f, area, menu),
         Modal::Login(ls) => draw_login_modal(f, area, ls),
     }
 }
 
-fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &ConnectMenu) -> Option<Rect> {
-    let rect = centered_rect(area, 62, 48);
-    f.render_widget(Clear, rect);
+fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &mut ConnectMenu) -> Option<Rect> {
+    let n = menu.items.len();
+    // content: title + blank + items + blank + 2 hint rows + borders (2)
+    let need_w = menu_content_width(menu);
+    let need_h = n as u16 + 7;
+    let rect = rect_centered(area, need_w, need_h);
+    // visible window — clamp scroll & selection to the actual modal size
+    let cap = (rect.height as usize).saturating_sub(7).max(1);
+    clamp_menu(menu, cap);
 
+    f.render_widget(Clear, rect);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw(" Select a provider:"));
     lines.push(Line::raw(""));
-    // item rows MUST stay contiguous (one row each) so mouse `menu_hit`
-    // (row = rect.y + 3 + idx) keeps lining up with the selection.
-    for (i, item) in menu.items.iter().enumerate() {
+    // item rows stay contiguous (one row each) so mouse `menu_hit`
+    // (row = rect.y + 3 + idx) lines up with the visible window.
+    for (i, item) in menu.items.iter().enumerate().skip(menu.scroll).take(cap) {
         let sel = i == menu.selected;
         let mark = if sel { "▸ " } else { "  " };
         match item {
@@ -951,8 +997,18 @@ fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &ConnectMenu) -> Option<Re
         }
     }
     lines.push(Line::raw(""));
+    // hint row doubles as a scroll hint when the menu overflows
+    let scroll_hint = if n > cap {
+        format!(
+            " ↑/↓/wheel scroll · Enter select · click a row ({}/{})",
+            menu.scroll + 1,
+            n
+        )
+    } else {
+        " ↑/↓ move · Enter select · click a row".to_string()
+    };
     lines.push(Line::from(vec![Span::styled(
-        " ↑/↓ move · Enter select · click a row",
+        scroll_hint,
         Style::default().fg(Color::DarkGray),
     )]));
     lines.push(Line::from(vec![Span::styled(
@@ -975,7 +1031,6 @@ fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &ConnectMenu) -> Option<Re
 }
 
 fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> {
-    let rect = centered_rect(area, 76, 60);
     let text = {
         let lines = ls.lines.lock().unwrap_or_else(|p| p.into_inner());
         lines.join("\n")
@@ -1041,6 +1096,12 @@ fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> 
         LoginKind::OpenRouter => " OpenRouter — API key ",
         LoginKind::OpenCodeGo => " OpenCode Go — API key ",
     };
+    // size to the actual content: text lines + status/input rows + borders,
+    // clamped to the available space (compact panes get a smaller modal)
+    // (`out` already includes the key field + hint lines above)
+    let need_h = out.len() as u16 + 2 + 1; // + borders + padding
+    let width = (area.width * 76 / 100).clamp(30, 76);
+    let rect = rect_centered(area, width, need_h);
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(out)
@@ -2253,6 +2314,49 @@ mod tests {
         assert_eq!(scroll, 1); // max_scroll = total(4) - viewport(3)
         let top_row: String = buf.content.iter().take(80).map(|c| c.symbol()).collect();
         assert!(top_row.trim_end().ends_with("▲"), "got: {top_row:?}");
+    }
+
+    #[test]
+    fn connect_menu_scrolls_to_reach_logout_on_tiny_screens() {
+        use ratatui::backend::TestBackend;
+
+        let mut modal = open_menu(&Snapshot::default());
+        let Modal::Menu(menu) = &mut modal else {
+            panic!()
+        };
+        menu.selected = menu.items.len() - 1; // Logout all
+
+        // 60x10 pane: the 8-item menu (needs 15 rows) is clamped to a tiny
+        // window whose scroll follows the selection down to the last entry.
+        let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        let mut mrect = None;
+        term.draw(|f| {
+            mrect = draw_modal(f, f.area(), &mut modal);
+        })
+        .unwrap();
+        let mrect = mrect.unwrap();
+        let Modal::Menu(menu) = &modal else { panic!() };
+        assert_eq!(menu.scroll, menu.items.len() - 1);
+
+        let txt: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            txt.contains("Logout all"),
+            "last row must be visible: {txt}"
+        );
+
+        // a click on the first visible item row resolves to that scrolled entry
+        let hit = menu_hit(&click(mrect.x + 2, mrect.y + 3), mrect, 1);
+        assert_eq!(hit, Some(0));
+        assert!(matches!(
+            menu_entry_at(&Some(modal), hit.unwrap()),
+            Some(MenuEntry::Logout(LogoutKind::All))
+        ));
     }
 
     #[test]

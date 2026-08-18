@@ -66,7 +66,9 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 
 The footer buttons are clickable with the mouse; provider rows in the Connect
 menu are clickable too. On the dashboard, the fold marker (`1▾ …`) left of each
-provider title is clickable, and the mouse wheel scrolls the body.
+provider title is clickable, and the mouse wheel scrolls the body. On small
+panes both the body and the Connect menu scroll (wheel / arrows), and modals
+size themselves to their content instead of overflowing.
 
 ## Credentials
 
