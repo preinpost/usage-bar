@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
-use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture};
 use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -17,8 +17,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::config::Config;
+use crate::model::{Snapshot, Status, fmt_money, fmt_tok};
 use crate::providers::copilot;
-use crate::model::{fmt_money, fmt_tok, Snapshot, Status};
 use crate::snapshot;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -95,8 +95,8 @@ enum Action {
 /// Refresh cadence shown in the footer: auto countdown + last refresh time,
 /// plus a short-lived `✓ refreshed` flash after a manual refresh.
 struct RefreshInfo {
-    last: String,          // HH:MM:SS of the last snapshot
-    next_in_secs: u64,     // seconds until the automatic refresh
+    last: String,      // HH:MM:SS of the last snapshot
+    next_in_secs: u64, // seconds until the automatic refresh
     flash: Option<(Instant, String)>,
 }
 
@@ -119,6 +119,10 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
 
     let refresh = Duration::from_secs(cfg.refresh_seconds.max(5));
     let mut snap = snapshot::snapshot(&cfg);
+    let mut folded = CollapseState::load();
+    let mut body = build_body(&cfg, &snap, folded, 120);
+    let mut scroll = 0usize;
+    let mut body_rect = Rect::default();
     let mut snap_at = Instant::now();
     let mut next_refresh = snap_at + refresh;
     // refresh the per-model cache once at startup if it's missing or stale
@@ -126,7 +130,12 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    if snap.or_usage.as_ref().map(|u| crate::openrouter::is_stale(u, now_unix)).unwrap_or(true) {
+    if snap
+        .or_usage
+        .as_ref()
+        .map(|u| crate::openrouter::is_stale(u, now_unix))
+        .unwrap_or(true)
+    {
         crate::openrouter::sync_async(&cfg);
     }
     let mut modal: Option<Modal> = None;
@@ -151,10 +160,17 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
             let rect = f.area();
             let info = RefreshInfo {
                 last: last_refresh.clone(),
-                next_in_secs: next_refresh.saturating_duration_since(Instant::now()).as_secs(),
+                next_in_secs: next_refresh
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
                 flash: flash.clone(),
             };
-            footer_rect = draw_dashboard(f, rect, &cfg, &snap, &info);
+            let w = f.area().width.max(8) as usize;
+            let fresh = build_body(&cfg, &snap, folded, w);
+            let (b, foot) = draw_dashboard(f, rect, &info, &fresh, &mut scroll);
+            body_rect = b;
+            footer_rect = foot;
+            body = fresh;
             modal_rect = match &modal {
                 Some(m) => draw_modal(f, rect, m),
                 None => None,
@@ -184,21 +200,55 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                     let path = crate::config::state_dir().join("mouse-events.log");
                     use std::io::Write as _;
                     if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true).append(true).open(&path)
+                        .create(true)
+                        .append(true)
+                        .open(&path)
                     {
-                        let _ = writeln!(f, "kind={:?} col={} row={} mods={:?}",
-                            m.kind, m.column, m.row, m.modifiers);
+                        let _ = writeln!(
+                            f,
+                            "kind={:?} col={} row={} mods={:?}",
+                            m.kind, m.column, m.row, m.modifiers
+                        );
                     }
                 }
             }
             match ev {
                 Event::Key(k) => {
-                    let quit = handle_key(k, &mut modal, &mut next_refresh, &cfg, &snap)?;
+                    let quit = handle_key(
+                        k,
+                        &mut modal,
+                        &mut next_refresh,
+                        &cfg,
+                        &snap,
+                        &mut scroll,
+                        &mut folded,
+                    )?;
                     if quit {
                         break Ok(());
                     }
                 }
                 Event::Mouse(m) => {
+                    // body scrolling + click-to-fold (only on the dashboard)
+                    if modal.is_none() {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => scroll = scroll.saturating_sub(3),
+                            MouseEventKind::ScrollDown => scroll = scroll.saturating_add(3),
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(s) = body_fold_hit(&m, body_rect, scroll, &body) {
+                                    folded.toggle(s);
+                                    folded.save();
+                                    body = build_body(
+                                        &cfg,
+                                        &snap,
+                                        folded,
+                                        body_rect.width.max(8) as usize,
+                                    );
+                                    scroll = 0;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     let menu_len = match &modal {
                         Some(Modal::Menu(menu)) => Some(menu.items.len()),
                         _ => None,
@@ -209,13 +259,13 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                         MouseDecision::Refresh => next_refresh = Instant::now(),
                         MouseDecision::OpenMenu => modal = Some(open_menu(&snap)),
                         MouseDecision::Dismiss => modal = None,
-                        MouseDecision::ConnectProvider(idx) => {
-                            match menu_entry_at(&modal, idx) {
-                                Some(MenuEntry::Provider(p)) => modal = Some(start_login(p.kind, &cfg)),
-                                Some(MenuEntry::Logout(k)) => do_logout(&cfg, &mut modal, &mut next_refresh, k),
-                                None => {}
+                        MouseDecision::ConnectProvider(idx) => match menu_entry_at(&modal, idx) {
+                            Some(MenuEntry::Provider(p)) => modal = Some(start_login(p.kind, &cfg)),
+                            Some(MenuEntry::Logout(k)) => {
+                                do_logout(&cfg, &mut modal, &mut next_refresh, k)
                             }
-                        }
+                            None => {}
+                        },
                     }
                 }
                 Event::Resize(_, _) => {}
@@ -232,7 +282,10 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                 _ => {}
             }
             if next_refresh != prev_next {
-                flash = Some((Instant::now() + Duration::from_secs(3), "✓ refreshed".to_string()));
+                flash = Some((
+                    Instant::now() + Duration::from_secs(3),
+                    "✓ refreshed".to_string(),
+                ));
             }
         }
         // fold a finished device login back into a fresh snapshot
@@ -265,6 +318,8 @@ fn handle_key(
     next_refresh: &mut Instant,
     cfg: &Config,
     snap: &Snapshot,
+    scroll: &mut usize,
+    folded: &mut CollapseState,
 ) -> std::io::Result<bool> {
     let ctrl_c = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c');
     if ctrl_c {
@@ -281,17 +336,15 @@ fn handle_key(
                     KeyCode::Down | KeyCode::Char('j') if n > 0 => {
                         menu.selected = (menu.selected + 1) % n;
                     }
-                    KeyCode::Enter => {
-                        match menu.items.get(menu.selected).cloned() {
-                            Some(MenuEntry::Provider(p)) => {
-                                *modal = Some(start_login(p.kind, cfg));
-                            }
-                            Some(MenuEntry::Logout(k)) => {
-                                do_logout(cfg, modal, next_refresh, k);
-                            }
-                            None => {}
+                    KeyCode::Enter => match menu.items.get(menu.selected).cloned() {
+                        Some(MenuEntry::Provider(p)) => {
+                            *modal = Some(start_login(p.kind, cfg));
                         }
-                    }
+                        Some(MenuEntry::Logout(k)) => {
+                            do_logout(cfg, modal, next_refresh, k);
+                        }
+                        None => {}
+                    },
                     KeyCode::Char('q') | KeyCode::Esc => *modal = None,
                     _ => {}
                 }
@@ -301,9 +354,8 @@ fn handle_key(
                 // Enter saves it and drops back to the refreshed dashboard.
                 // Keys can contain any character, so `q` only cancels while
                 // the field is empty.
-                let inputting =
-                    matches!(ls.kind, LoginKind::OpenRouter | LoginKind::OpenCodeGo)
-                        && !ls.done.load(Ordering::Relaxed);
+                let inputting = matches!(ls.kind, LoginKind::OpenRouter | LoginKind::OpenCodeGo)
+                    && !ls.done.load(Ordering::Relaxed);
                 if inputting {
                     match k.code {
                         KeyCode::Esc => *modal = None,
@@ -338,11 +390,25 @@ fn handle_key(
     match k.code {
         KeyCode::Char('q') | KeyCode::Char('x') | KeyCode::Esc => return Ok(true),
         KeyCode::Char('c') | KeyCode::Char('C') => *modal = Some(open_menu(snap)),
-        KeyCode::Char('l') | KeyCode::Char('L') => *modal = Some(start_login(LoginKind::Copilot, cfg)),
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            *modal = Some(start_login(LoginKind::Copilot, cfg))
+        }
         KeyCode::Char('g') | KeyCode::Char('G') => *modal = Some(start_login(LoginKind::Grok, cfg)),
         KeyCode::Char('r') | KeyCode::Char('R') => {
             *next_refresh = Instant::now();
             crate::openrouter::sync_async(cfg); // also refresh the model-usage cache
+        }
+        // body scroll (when content overflows the pane)
+        KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
+        KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+        KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+        KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+        // fold/unfold sections by their left-key (1..7)
+        KeyCode::Char(c) if ('1'..='7').contains(&c) => {
+            if let Some(s) = Section::from_key(c) {
+                folded.toggle(s);
+                folded.save();
+            }
         }
         _ => {}
     }
@@ -373,7 +439,10 @@ fn open_menu(snap: &Snapshot) -> Modal {
     } else if let Some(e) = &snap.openrouter.error {
         format!("error ({e})")
     } else {
-        format!("credits {}", crate::model::fmt_money(snap.openrouter.balance_usd))
+        format!(
+            "credits {}",
+            crate::model::fmt_money(snap.openrouter.balance_usd)
+        )
     };
     let ogo_status = if snap.opencode_go.needs_key {
         "needs key (opencode auth.json)".into()
@@ -387,10 +456,26 @@ fn open_menu(snap: &Snapshot) -> Modal {
     Modal::Menu(ConnectMenu {
         selected: 0,
         items: vec![
-            MenuEntry::Provider(ProviderItem { name: "GitHub Copilot", status: copilot_status, kind: LoginKind::Copilot }),
-            MenuEntry::Provider(ProviderItem { name: "Grok (xAI)", status: grok_status, kind: LoginKind::Grok }),
-            MenuEntry::Provider(ProviderItem { name: "OpenRouter", status: or_status, kind: LoginKind::OpenRouter }),
-            MenuEntry::Provider(ProviderItem { name: "OpenCode Go", status: ogo_status, kind: LoginKind::OpenCodeGo }),
+            MenuEntry::Provider(ProviderItem {
+                name: "GitHub Copilot",
+                status: copilot_status,
+                kind: LoginKind::Copilot,
+            }),
+            MenuEntry::Provider(ProviderItem {
+                name: "Grok (xAI)",
+                status: grok_status,
+                kind: LoginKind::Grok,
+            }),
+            MenuEntry::Provider(ProviderItem {
+                name: "OpenRouter",
+                status: or_status,
+                kind: LoginKind::OpenRouter,
+            }),
+            MenuEntry::Provider(ProviderItem {
+                name: "OpenCode Go",
+                status: ogo_status,
+                kind: LoginKind::OpenCodeGo,
+            }),
             MenuEntry::Logout(LogoutKind::Copilot),
             MenuEntry::Logout(LogoutKind::OpenRouter),
             MenuEntry::Logout(LogoutKind::OpenCodeGo),
@@ -469,7 +554,14 @@ fn start_copilot_login(cfg: &Config) -> LoginState {
         }
         d2.store(true, Ordering::Relaxed);
     });
-    LoginState { kind: LoginKind::Copilot, lines, done, connected, connected_at: None, input: String::new() }
+    LoginState {
+        kind: LoginKind::Copilot,
+        lines,
+        done,
+        connected,
+        connected_at: None,
+        input: String::new(),
+    }
 }
 
 /// Decide whether a finished login modal should close & trigger a refresh.
@@ -522,7 +614,12 @@ fn submit_api_key(ls: &mut LoginState, cfg: &Config) {
 
 /// Clear every saved provider token (Copilot OAuth + OpenRouter/OpenCode-go
 /// keys), close the menu and refresh so the panel reflects the logged-out state.
-fn do_logout(cfg: &Config, modal: &mut Option<Modal>, next_refresh: &mut Instant, kind: LogoutKind) {
+fn do_logout(
+    cfg: &Config,
+    modal: &mut Option<Modal>,
+    next_refresh: &mut Instant,
+    kind: LogoutKind,
+) {
     match kind {
         LogoutKind::Copilot => crate::providers::copilot::clear_token(cfg),
         LogoutKind::OpenRouter => crate::openrouter::clear_key(cfg),
@@ -557,18 +654,41 @@ fn open_url(url: &str) {
 /* drawing                                                             */
 /* ------------------------------------------------------------------ */
 
-fn draw_dashboard(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot, refresh: &RefreshInfo) -> Rect {
-    let constraints = [Constraint::Length(2), Constraint::Min(0), Constraint::Length(2)];
+fn draw_dashboard(
+    f: &mut Frame,
+    area: Rect,
+    refresh: &RefreshInfo,
+    body: &BodyLines,
+    scroll: &mut usize,
+) -> (Rect, Rect) {
+    let constraints = [
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(2),
+    ];
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    // header: title only — the right-hand live reset countdown was dropped.
+    // header: title + right-aligned fold/scroll hint.
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("UsageBar", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "UsageBar",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(chunks[0].width.saturating_sub(8 + 28) as usize)),
+        Span::styled(
+            " 1-7 fold · j/k/wheel scroll",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
-    f.render_widget(header, Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1));
+    f.render_widget(
+        header,
+        Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1),
+    );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(chunks[0].width as usize),
@@ -577,7 +697,7 @@ fn draw_dashboard(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot, refr
         Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1),
     );
 
-    draw_body(f, chunks[1], cfg, snap);
+    draw_body(f, chunks[1], body, scroll);
 
     // footer: buttons row + separator row
     let mut spans = Vec::<Span<'static>>::new();
@@ -588,7 +708,9 @@ fn draw_dashboard(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot, refr
         }
         spans.push(Span::styled(
             label[..3].to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(label[3..].to_string()));
     }
@@ -596,20 +718,31 @@ fn draw_dashboard(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot, refr
     // short yellow `✓ refreshed` flash right after a manual refresh.
     let buttons_w = footer_layout().iter().map(|r| r.3).max().unwrap_or(0) as usize;
     let now = Instant::now();
-    let flashing = refresh.flash.as_ref().map(|(u, _)| now < *u).unwrap_or(false);
+    let flashing = refresh
+        .flash
+        .as_ref()
+        .map(|(u, _)| now < *u)
+        .unwrap_or(false);
     let status = if flashing {
         "✓ refreshed".to_string()
     } else {
         format!("⟳ auto {}s · last {}", refresh.next_in_secs, refresh.last)
     };
-    let pad = (chunks[2].width as usize)
-        .saturating_sub(buttons_w + status.chars().count() + 1);
+    let pad = (chunks[2].width as usize).saturating_sub(buttons_w + status.chars().count() + 1);
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::styled(
         status,
         Style::default()
-            .fg(if flashing { Color::Yellow } else { Color::DarkGray })
-            .add_modifier(if flashing { Modifier::BOLD } else { Modifier::empty() }),
+            .fg(if flashing {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            })
+            .add_modifier(if flashing {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
     ));
     let mut footer_rows = vec![Line::from(spans)];
     footer_rows.push(Line::from(Span::styled(
@@ -617,7 +750,7 @@ fn draw_dashboard(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot, refr
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(Paragraph::new(footer_rows), chunks[2]);
-    chunks[2]
+    (chunks[1], chunks[2])
 }
 
 /// (action, label, start_x, end_x_exclusive) measured from the footer's left edge.
@@ -708,6 +841,27 @@ fn decide_mouse(
     }
 }
 
+/// Map a body click on the left marker column (digit+triangle) to a section.
+/// The marker zone is the first 3 columns of the body area.
+fn body_fold_hit(
+    m: &crossterm::event::MouseEvent,
+    body_rect: Rect,
+    scroll: usize,
+    body: &BodyLines,
+) -> Option<Section> {
+    if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) || body_rect.height == 0 {
+        return None;
+    }
+    if m.column < body_rect.x || m.column > body_rect.x + 2 {
+        return None;
+    }
+    if m.row < body_rect.y || m.row >= body_rect.y + body_rect.height {
+        return None;
+    }
+    let line_idx = scroll + (m.row - body_rect.y) as usize;
+    body.section_at(line_idx)
+}
+
 /// Find which provider row a click landed on in the connect menu.
 /// Item rows are laid out at modal.y + 3 + i (title + blank line above).
 fn menu_hit(m: &crossterm::event::MouseEvent, mrect: Rect, n: usize) -> Option<usize> {
@@ -722,11 +876,7 @@ fn menu_hit(m: &crossterm::event::MouseEvent, mrect: Rect, n: usize) -> Option<u
         return None;
     }
     let idx = (m.row - first) as usize;
-    if idx < n {
-        Some(idx)
-    } else {
-        None
-    }
+    if idx < n { Some(idx) } else { None }
 }
 
 fn centered_rect(area: Rect, x_pct: u16, y_pct: u16) -> Rect {
@@ -775,7 +925,11 @@ fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &ConnectMenu) -> Option<Re
                         format!("{mark}{:<16}", p.name),
                         Style::default()
                             .fg(if sel { Color::Yellow } else { Color::White })
-                            .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                            .add_modifier(if sel {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                     ),
                     Span::styled(p.status.clone(), Style::default().fg(Color::DarkGray)),
                 ]));
@@ -787,18 +941,24 @@ fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &ConnectMenu) -> Option<Re
                     format!("{mark}{}", k.label()),
                     Style::default()
                         .fg(if sel { color } else { Color::DarkGray })
-                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if sel {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 )]));
             }
         }
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(" ↑/↓ move · Enter select · click a row", Style::default().fg(Color::DarkGray)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" Esc / q  close", Style::default().fg(Color::DarkGray)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        " ↑/↓ move · Enter select · click a row",
+        Style::default().fg(Color::DarkGray),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        " Esc / q  close",
+        Style::default().fg(Color::DarkGray),
+    )]));
 
     f.render_widget(
         Paragraph::new(lines)
@@ -826,18 +986,20 @@ fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> 
         let msg = match ls.kind {
             LoginKind::OpenRouter => "✓ API key saved — checking credits…",
             LoginKind::OpenCodeGo => "✓ API key saved — checking quota…",
-            LoginKind::Copilot | LoginKind::Grok => {
-                "✓ Connected — OAuth token saved, closing…"
-            }
+            LoginKind::Copilot | LoginKind::Grok => "✓ Connected — OAuth token saved, closing…",
         };
         out.push(Line::from(vec![Span::styled(
             msg,
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         )]));
     } else if ls.done.load(Ordering::Relaxed) {
         out.push(Line::from(vec![Span::styled(
             "login failed — press q/Esc to return",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]));
     } else if matches!(ls.kind, LoginKind::OpenRouter | LoginKind::OpenCodeGo) {
         // key input field rendered below
@@ -860,7 +1022,12 @@ fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> 
             }
         }
         out.push(Line::from(vec![
-            Span::styled(masked, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                masked,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("▏", Style::default().fg(Color::DarkGray)),
         ]));
         out.push(Line::from(vec![Span::styled(
@@ -889,70 +1056,292 @@ fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> 
     Some(rect)
 }
 
-fn draw_body(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot) {
-    let width = area.width.max(1) as usize;
-    let mut y = area.y;
-    let max_y = area.y + area.height;
+/// Accumulates the dashboard body as a list of lines so the renderer can
+/// scroll/clip them to the viewport instead of silently dropping content.
+/// Dashboard sections that can be collapsed/expanded. The key shown left of
+/// the triangle in the title row is its fold shortcut (1..7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    Claude,
+    Codex,
+    OpenCode,
+    OpenCodeGo,
+    Copilot,
+    Grok,
+    OpenRouter,
+}
 
-    fn next_slot(y: &mut u16, h: u16, max: u16) -> Option<Rect> {
-        if *y + h > max {
-            return None;
+impl Section {
+    const ALL: [Section; 7] = [
+        Section::Claude,
+        Section::Codex,
+        Section::OpenCode,
+        Section::OpenCodeGo,
+        Section::Copilot,
+        Section::Grok,
+        Section::OpenRouter,
+    ];
+
+    fn idx(self) -> usize {
+        match self {
+            Section::Claude => 0,
+            Section::Codex => 1,
+            Section::OpenCode => 2,
+            Section::OpenCodeGo => 3,
+            Section::Copilot => 4,
+            Section::Grok => 5,
+            Section::OpenRouter => 6,
         }
-        let r = Rect::new(0, *y, 0, h); // width fixed at the call site
-        *y += h;
-        Some(r)
     }
-    fn put(f: &mut Frame, area: Rect, line: Line<'static>) {
-        f.render_widget(Paragraph::new(line), area);
+    fn key(self) -> char {
+        (b'1' + self.idx() as u8) as char
     }
-    fn divider_slot(y: &mut u16, max: u16, drew: bool) -> Option<Rect> {
-        // separator between providers: only when something was drawn before,
-        // and leave room for at least one provider row after it.
-        if drew && *y + 2 <= max {
-            next_slot(y, 1, max)
-        } else {
-            None
+    fn from_key(c: char) -> Option<Section> {
+        Section::ALL.into_iter().find(|s| s.key() == c)
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Section::Claude => "Claude Code",
+            Section::Codex => "Codex",
+            Section::OpenCode => "OpenCode",
+            Section::OpenCodeGo => "OpenCode Go",
+            Section::Copilot => "Copilot",
+            Section::Grok => "Grok",
+            Section::OpenRouter => "OpenRouter",
         }
     }
-    fn draw_divider(f: &mut Frame, r: Rect, width: usize) {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+    fn from_name(n: &str) -> Option<Section> {
+        Section::ALL.into_iter().find(|s| s.name() == n)
+    }
+}
+
+/// Per-section fold state as a bitmask, persisted to the state dir so the
+/// layout survives restarts.
+#[derive(Clone, Copy, Default)]
+struct CollapseState {
+    bits: u8,
+}
+
+impl CollapseState {
+    fn collapsed(&self, s: Section) -> bool {
+        (self.bits >> s.idx()) & 1 == 1
+    }
+    fn toggle(&mut self, s: Section) {
+        self.bits ^= 1 << s.idx();
+    }
+    fn load() -> Self {
+        let mut c = CollapseState::default();
+        let p = crate::config::state_dir().join("collapsed.json");
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            return c;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return c;
+        };
+        if let Some(arr) = v.as_array() {
+            for item in arr {
+                if let Some(n) = item.as_str() {
+                    if let Some(s) = Section::from_name(n) {
+                        c.bits |= 1 << s.idx();
+                    }
+                }
+            }
+        }
+        c
+    }
+    fn save(&self) {
+        let names: Vec<&str> = Section::ALL
+            .into_iter()
+            .filter(|s| self.collapsed(*s))
+            .map(|s| s.name())
+            .collect();
+        let Ok(text) = serde_json::to_string(&names) else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(crate::config::state_dir());
+        let _ = std::fs::write(crate::config::state_dir().join("collapsed.json"), text);
+    }
+}
+
+/// Accumulates the dashboard body as a list of lines so the renderer can
+/// scroll/clip them to the viewport instead of silently dropping content.
+/// Section title rows record their section for click-to-fold hit-testing.
+struct BodyLines {
+    lines: Vec<Line<'static>>,
+    sections: Vec<Option<Section>>,
+    drew: bool,
+}
+
+impl BodyLines {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            sections: Vec::new(),
+            drew: false,
+        }
+    }
+    fn push(&mut self, line: Line<'static>) {
+        self.drew = true;
+        self.lines.push(line);
+        self.sections.push(None);
+    }
+    fn push_section(&mut self, s: Section, line: Line<'static>) {
+        self.drew = true;
+        self.lines.push(line);
+        self.sections.push(Some(s));
+    }
+    /// separator between provider sections — only when something preceded it
+    fn divider(&mut self, width: usize) {
+        if self.drew {
+            self.push(Line::from(Span::styled(
                 "─".repeat(width),
                 Style::default().fg(Color::DarkGray),
-            ))),
-            r,
-        );
+            )));
+        }
     }
-    let mut drew = false;
+    fn msg(&mut self, text: String, color: Color, bold: bool) {
+        let mut s = Style::default().fg(color);
+        if bold {
+            s = s.add_modifier(Modifier::BOLD);
+        }
+        self.push(Line::from(Span::styled(text, s)));
+    }
+    /// Which section a rendered line belongs to (title rows carry the section;
+    /// detail rows inherit the nearest one above).
+    fn section_at(&self, line_idx: usize) -> Option<Section> {
+        let n = self.sections.len();
+        if n == 0 {
+            return None;
+        }
+        let idx = line_idx.min(n - 1);
+        self.sections[..=idx].iter().rev().find_map(|s| *s)
+    }
+}
+
+/// Fixed-width left/right row used by the compact (narrow-pane) meters.
+fn compact_line(left: String, right: String, color: Color, width: usize) -> Line<'static> {
+    let right_w = right.chars().count();
+    let left_max = width.saturating_sub(right_w + 2).max(4);
+    let left = fit_width(&left, left_max);
+    let pad = width.saturating_sub(left.chars().count() + right_w);
+    Line::from(vec![
+        Span::styled(left, Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(
+            right,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+/// Compact meter without the 20-char bar: `  name 43%` + right tail.
+fn compact_meter(name: &str, frac: f64, tail: String, width: usize) -> Line<'static> {
+    let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u8;
+    compact_line(format!("  {name} {pct}%"), tail, bar_color(frac), width)
+}
+
+/// Compact budget row: `  budget 10.00M` + right `46%` (no bar).
+fn compact_budget_line(label: &str, total: u64, budget: u64, width: usize) -> Line<'static> {
+    let frac = if budget > 0 {
+        total as f64 / budget as f64
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
+    compact_line(
+        format!("  {label} {}", crate::model::fmt_tok(budget)),
+        format!("{:.0}%", frac * 100.0),
+        bar_color(frac),
+        width,
+    )
+}
+
+/// Small right-corner overlay (`▲` at the top / `▼ n more` at the bottom)
+/// signalling there is more content above/below the scroll position.
+fn overlay_corner(f: &mut Frame, area: Rect, text: &str, top: bool) {
+    let w = text.chars().count() as u16;
+    let x = area.x + area.width.saturating_sub(w);
+    let y = if top {
+        area.y
+    } else {
+        area.y + area.height.saturating_sub(1)
+    };
+    let rect = Rect::new(x, y, w, 1);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        rect,
+    );
+}
+
+/// Section title row: `1▾ Claude Code  <stats>  <tail>`. Folded sections keep
+/// only this row, dimmed, with a `▸` marker — click the left marker or press
+/// the digit to unfold.
+fn section_line(s: Section, open: bool, body: &str, tail: &str, width: usize) -> Line<'static> {
+    let mark = if open { "▾" } else { "▸" };
+    let name = format!("{}{} {}", s.key(), mark, s.name());
+    let line = title_line(&name, body, tail, width);
+    if open {
+        line
+    } else {
+        let spans = line
+            .spans
+            .iter()
+            .map(|sp| Span::styled(sp.content.clone(), Style::default().fg(Color::DarkGray)))
+            .collect::<Vec<_>>();
+        Line::from(spans)
+    }
+}
+
+/// Lay out the dashboard body (which lines to show, in what order).
+/// Detail rows are skipped for folded sections. `width` selects the compact
+/// (narrow-pane) formatting that drops bars and detail rows.
+fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize) -> BodyLines {
+    let compact = width < 56;
+    let mut body = BodyLines::new();
+
     // Show only providers that are actually connected / have data this window.
     // Set `show_no_data_providers: true` in config.json to opt back into the
     // always-show-everything layout.
     let show_all = cfg.show_no_data_providers;
     let c_active = snap.claude.msgs > 0 || snap.claude.has_token_data;
     let x_active = snap.codex.sessions > 0 || snap.codex.turns > 0 || snap.codex.has_token_data;
-    let o_active = snap.opencode.as_ref().map(|o| o.sessions > 0 || o.has_token_data).unwrap_or(false);
+    let o_active = snap
+        .opencode
+        .as_ref()
+        .map(|o| o.sessions > 0 || o.has_token_data)
+        .unwrap_or(false);
     let cp_active = matches!(&snap.copilot, Status::Ok(_));
     let g_active = !snap.grok.needs_login || snap.grok.local_sessions > 0;
     let ogo_active = !snap.opencode_go.needs_key;
     let or_active = !snap.openrouter.needs_key;
-    let any_active = show_all || c_active || x_active || o_active || cp_active || g_active || ogo_active || or_active;
+    let any_active = show_all
+        || c_active
+        || x_active
+        || o_active
+        || cp_active
+        || g_active
+        || ogo_active
+        || or_active;
 
     if !any_active {
-        if let Some(r) = next_slot(&mut y, 1, max_y) {
-            let r = Rect::new(area.x, r.y, area.width, r.height);
-            f.render_widget(
-                Paragraph::new("no active providers — press [C] Connect or run a CLI first")
-                    .style(Style::default().fg(Color::DarkGray)),
-                r,
-            );
-        }
-        return;
+        body.msg(
+            "no active providers — press [C] Connect or run a CLI first".into(),
+            Color::DarkGray,
+            false,
+        );
+        return body;
     }
 
     // ---- Claude Code
     if show_all || c_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+        if !compact {
+            body.divider(width);
         }
         let c = &snap.claude;
         let mut stats = format!(
@@ -962,29 +1351,45 @@ fn draw_body(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot) {
             fmt_tok(c.tokens.cache_read + c.tokens.cache_write),
         );
         if c.msgs > 0 {
-            stats.push_str(&format!(" · {} msg{}", c.msgs, if c.msgs == 1 { "" } else { "s" }));
+            stats.push_str(&format!(
+                " · {} msg{}",
+                c.msgs,
+                if c.msgs == 1 { "" } else { "s" }
+            ));
         }
-        if let Some(r) = next_slot(&mut y, 1, max_y) {
-            let r = Rect::new(area.x, r.y, area.width, r.height);
-            put(f, r, title_line("Claude Code", &stats, &fmt_money(c.cost), width));
-        }
-        if let Some(r) = next_slot(&mut y, 1, max_y) {
-            let r = Rect::new(area.x, r.y, area.width, r.height);
-            put(f, r, budget_line("budget", c.tokens.total(), cfg.claude_budget, width));
-        }
-        for item in c.items.iter().take(2) {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, item_line(&item.name, item.tokens.total(), width));
+        let open = !folded.collapsed(Section::Claude);
+        body.push_section(
+            Section::Claude,
+            section_line(Section::Claude, open, &stats, &fmt_money(c.cost), width),
+        );
+        if open {
+            if compact {
+                body.push(compact_budget_line(
+                    "budget",
+                    c.tokens.total(),
+                    cfg.claude_budget,
+                    width,
+                ));
+            } else {
+                body.push(budget_line(
+                    "budget",
+                    c.tokens.total(),
+                    cfg.claude_budget,
+                    width,
+                ));
+            }
+            if !compact {
+                for item in c.items.iter().take(2) {
+                    body.push(item_line(&item.name, item.tokens.total(), width));
+                }
             }
         }
-        drew = true;
     }
 
     // ---- Codex
     if show_all || x_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+        if !compact {
+            body.divider(width);
         }
         let x = &snap.codex;
         let token_s = if x.has_token_data {
@@ -995,20 +1400,23 @@ fn draw_body(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot) {
                 fmt_tok(x.tokens.cache_read + x.tokens.cache_write),
             )
         } else {
-            format!("{} sessions · {} turns (no token data)", x.sessions, x.turns)
+            format!(
+                "{} sessions · {} turns (no token data)",
+                x.sessions, x.turns
+            )
         };
-        if let Some(r) = next_slot(&mut y, 1, max_y) {
-            let r = Rect::new(area.x, r.y, area.width, r.height);
-            put(f, r, title_line("Codex", &token_s, &fmt_money(x.cost), width));
-        }
-        drew = true;
+        let open = !folded.collapsed(Section::Codex);
+        body.push_section(
+            Section::Codex,
+            section_line(Section::Codex, open, &token_s, &fmt_money(x.cost), width),
+        );
     }
 
     // ---- OpenCode
     if let Some(o) = &snap.opencode {
         if show_all || o_active {
-            if let Some(r) = divider_slot(&mut y, max_y, drew) {
-                draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+            if !compact {
+                body.divider(width);
             }
             let mut stats = format!(
                 "in {} · out {} · cache {}",
@@ -1017,49 +1425,56 @@ fn draw_body(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot) {
                 fmt_tok(o.tokens.cache_read + o.tokens.cache_write),
             );
             if o.sessions > 0 {
-                stats.push_str(&format!(" · {} session{}", o.sessions, if o.sessions == 1 { "" } else { "s" }));
+                stats.push_str(&format!(
+                    " · {} session{}",
+                    o.sessions,
+                    if o.sessions == 1 { "" } else { "s" }
+                ));
             }
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, title_line("OpenCode", &stats, &fmt_money(o.cost), width));
-            }
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, budget_line("budget", o.tokens.total(), cfg.opencode_budget, width));
-            }
-            for item in o.items.iter().take(1) {
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    put(f, r, item_line(&item.name, item.tokens.total(), width));
+            let open = !folded.collapsed(Section::OpenCode);
+            body.push_section(
+                Section::OpenCode,
+                section_line(Section::OpenCode, open, &stats, &fmt_money(o.cost), width),
+            );
+            if open {
+                if compact {
+                    body.push(compact_budget_line(
+                        "budget",
+                        o.tokens.total(),
+                        cfg.opencode_budget,
+                        width,
+                    ));
+                } else {
+                    body.push(budget_line(
+                        "budget",
+                        o.tokens.total(),
+                        cfg.opencode_budget,
+                        width,
+                    ));
+                }
+                if !compact {
+                    for item in o.items.iter().take(1) {
+                        body.push(item_line(&item.name, item.tokens.total(), width));
+                    }
                 }
             }
-            drew = true;
         }
     }
 
     // ---- OpenCode Go (official quota API)
     if show_all || ogo_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+        if !compact {
+            body.divider(width);
         }
         let ogo = &snap.opencode_go;
         if ogo.needs_key {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                f.render_widget(
-                    Paragraph::new("OpenCode Go — no key (run `opencode login`, or set OPENCODE_API_KEY)")
-                        .style(Style::default().fg(Color::DarkGray)),
-                    r,
-                );
-            }
+            body.msg(
+                "OpenCode Go — no key (run `opencode login`, or set OPENCODE_API_KEY)".into(),
+                Color::DarkGray,
+                false,
+            );
         } else if let Some(e) = &ogo.error {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                f.render_widget(
-                    Paragraph::new(format!("OpenCode Go — {e}")).style(Style::default().fg(Color::Red)),
-                    r,
-                );
-            }
+            body.msg(format!("OpenCode Go — {e}"), Color::Red, false);
         } else {
             let mut tail = String::new();
             if let Some(w) = &ogo.rolling {
@@ -1069,261 +1484,263 @@ fn draw_body(f: &mut Frame, area: Rect, cfg: &Config, snap: &Snapshot) {
                     tail = format!("rolling {}%", w.percent);
                 }
             }
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, title_line("OpenCode Go", "official quota", &tail, width));
-            }
-            for (label, w) in [
-                ("rolling", &ogo.rolling),
-                ("weekly", &ogo.weekly),
-                ("monthly", &ogo.monthly),
-            ] {
-                let Some(w) = w else { continue };
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
+            let open = !folded.collapsed(Section::OpenCodeGo);
+            body.push_section(
+                Section::OpenCodeGo,
+                section_line(Section::OpenCodeGo, open, "official quota", &tail, width),
+            );
+            if open {
+                for (label, w) in [
+                    ("rolling", &ogo.rolling),
+                    ("weekly", &ogo.weekly),
+                    ("monthly", &ogo.monthly),
+                ] {
+                    let Some(w) = w else { continue };
                     let frac = w.percent as f64 / 100.0;
-                    let resets = crate::providers::opencode_go::format_resets_at(w.resets_at.as_deref());
-                    let right = if w.rate_limited() {
+                    let resets =
+                        crate::providers::opencode_go::format_resets_at(w.resets_at.as_deref());
+                    let rtail = if w.rate_limited() {
                         format!("LIMIT · resets {resets}")
                     } else {
-                        format!("{}% · resets {resets}", w.percent)
+                        format!("resets {resets}")
                     };
-                    put(f, r, meter_line(label, frac, right, width));
+                    if compact {
+                        body.push(compact_meter(label, frac, rtail, width));
+                    } else {
+                        let right = if w.rate_limited() {
+                            format!("100% · {rtail}")
+                        } else {
+                            format!("{}% · {rtail}", w.percent)
+                        };
+                        body.push(meter_line(label, frac, right, width));
+                    }
                 }
             }
         }
-        drew = true;
     }
 
     // ---- Copilot
     if show_all || cp_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+        if !compact {
+            body.divider(width);
         }
         match &snap.copilot {
             Status::Ok(cp) => {
                 let meta = format!("{} · reset {}", cp.plan, cp.reset);
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    put(f, r, title_line("Copilot", "", &meta, width));
-                }
-                // only the quotas that actually run out (AI credits on
-                // token-based plans); unlimited chat/completions are skipped.
-                for q in cp.quotas.iter().filter(|q| !q.unlimited && q.used_pct.is_some()) {
-                    if let Some(r) = next_slot(&mut y, 1, max_y) {
-                        let r = Rect::new(area.x, r.y, area.width, r.height);
+                let open = !folded.collapsed(Section::Copilot);
+                body.push_section(
+                    Section::Copilot,
+                    section_line(Section::Copilot, open, "", &meta, width),
+                );
+                if open {
+                    // only the quotas that actually run out (AI credits on
+                    // token-based plans); unlimited chat/completions are skipped.
+                    for q in cp
+                        .quotas
+                        .iter()
+                        .filter(|q| !q.unlimited && q.used_pct.is_some())
+                    {
                         let frac = q.used_pct.unwrap() as f64 / 100.0;
-                        let right = if q.entitlement > 0 && (q.used > 0 || q.entitlement > 0) {
-                            format!("{:.0}% · {} / {}", frac * 100.0, crate::model::fmt_int(q.used), crate::model::fmt_int(q.entitlement))
+                        let right = if q.entitlement > 0 {
+                            format!(
+                                "{:.0}% · {} / {}",
+                                frac * 100.0,
+                                crate::model::fmt_int(q.used),
+                                crate::model::fmt_int(q.entitlement)
+                            )
                         } else {
                             format!("{:.0}%", frac * 100.0)
                         };
-                        put(f, r, meter_line(&q.name, frac, right, width));
+                        if compact {
+                            body.push(compact_meter(&q.name, frac, right, width));
+                        } else {
+                            body.push(meter_line(&q.name, frac, right, width));
+                        }
                     }
                 }
             }
             other => {
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    f.render_widget(
-                        Paragraph::new(format!("Copilot — {other}")).style(Style::default().fg(Color::DarkGray)),
-                        r,
-                    );
-                }
+                body.msg(format!("Copilot — {other}"), Color::DarkGray, false);
             }
         }
-        drew = true;
     }
 
     // ---- Grok
     if show_all || g_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
-        }
-        if snap.grok.needs_login {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                f.render_widget(
-                    Paragraph::new("Grok — needs 'grok login' or GROK_OAUTH_TOKEN")
-                        .style(Style::default().fg(Color::DarkGray)),
-                    r,
-                );
-            }
+        // figure out what (if anything) this section shows before drawing a
+        // divider, so a status with no displayable line can't leave a stray bar
+        let line: Option<Line<'static>> = if snap.grok.needs_login {
+            Some(Line::from(Span::styled(
+                "Grok — needs 'grok login' or GROK_OAUTH_TOKEN",
+                Style::default().fg(Color::DarkGray),
+            )))
         } else if let Some(e) = &snap.grok.error {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                f.render_widget(
-                    Paragraph::new(format!("Grok — error ({e})")).style(Style::default().fg(Color::Red)),
-                    r,
-                );
-            }
+            Some(Line::from(Span::styled(
+                format!("Grok — error ({e})"),
+                Style::default().fg(Color::Red),
+            )))
         } else if let Some(p) = snap.grok.used_pct {
             let resets = snap.grok.resets_at.as_deref().unwrap_or("—");
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, title_line("Grok", &format!("credits {p:.0}% used · resets {resets}"), "", width));
+            let open = !folded.collapsed(Section::Grok);
+            Some(section_line(
+                Section::Grok,
+                open,
+                &format!("credits {p:.0}% used · resets {resets}"),
+                "",
+                width,
+            ))
+        } else {
+            None
+        };
+        if let Some(ref l) = line {
+            if !compact {
+                body.divider(width);
             }
+            body.push(l.clone());
         }
-        if snap.grok.local_sessions > 0 {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(
-                    f,
-                    r,
-                    item_line(
-                        &format!("grok local: {} sessions", snap.grok.local_sessions),
-                        snap.grok.local_tokens,
-                        width,
-                    ),
-                );
-            }
+        if !compact && snap.grok.local_sessions > 0 && line.is_some() {
+            body.push(item_line(
+                &format!("grok local: {} sessions", snap.grok.local_sessions),
+                snap.grok.local_tokens,
+                width,
+            ));
         }
-        drew = true;
     }
-
     // ---- OpenRouter
     if show_all || or_active {
-        if let Some(r) = divider_slot(&mut y, max_y, drew) {
-            draw_divider(f, Rect::new(area.x, r.y, area.width, r.height), width);
+        if !compact {
+            body.divider(width);
         }
         let or = &snap.openrouter;
         if let Some(e) = &or.error {
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                f.render_widget(
-                    Paragraph::new(format!("OpenRouter — error ({e})")).style(Style::default().fg(Color::Red)),
-                    r,
-                );
-            }
+            body.msg(format!("OpenRouter — error ({e})"), Color::Red, false);
         } else {
             let bal = fmt_money(or.balance_usd);
             let tail = match or.key_limit_usd {
                 Some(l) => format!("limit {}", fmt_money(l)),
                 None => String::new(),
             };
-            if let Some(r) = next_slot(&mut y, 1, max_y) {
-                let r = Rect::new(area.x, r.y, area.width, r.height);
-                put(f, r, title_line("OpenRouter", &format!("credits {bal}"), &tail, width));
-            }
-            // Credits usage bar (how much of the purchased credits is spent)
-            if or.total_credits_usd > 0.0 {
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
+            let open = !folded.collapsed(Section::OpenRouter);
+            body.push_section(
+                Section::OpenRouter,
+                section_line(
+                    Section::OpenRouter,
+                    open,
+                    &format!("credits {bal}"),
+                    &tail,
+                    width,
+                ),
+            );
+            if open {
+                // Credits usage bar (how much of the purchased credits is spent)
+                if or.total_credits_usd > 0.0 {
                     let frac = (or.total_usage_usd / or.total_credits_usd).clamp(0.0, 1.0);
-                    put(
-                        f,
-                        r,
-                        meter_line(
-                            "credits",
-                            frac,
-                            format!(
-                                "{:.0}% · {} used · {} left",
-                                frac * 100.0,
-                                fmt_money(or.total_usage_usd),
-                                fmt_money(or.balance_usd),
-                            ),
-                            width,
-                        ),
+                    let right = format!(
+                        "{:.0}% · {} used · {} left",
+                        frac * 100.0,
+                        fmt_money(or.total_usage_usd),
+                        fmt_money(or.balance_usd),
                     );
+                    if compact {
+                        body.push(compact_meter("credits", frac, right, width));
+                    } else {
+                        body.push(meter_line("credits", frac, right, width));
+                    }
                 }
-            }
-            // API-key spending meter when a key limit is configured
-            if let (Some(p), Some(limit)) = (or.used_pct, or.key_limit_usd) {
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
+                // API-key spending meter when a key limit is configured
+                if let (Some(p), Some(limit)) = (or.used_pct, or.key_limit_usd) {
                     let used = or.key_used_usd.unwrap_or(0.0);
-                    put(
-                        f,
-                        r,
-                        meter_line(
-                            "key budget",
-                            p as f64 / 100.0,
-                            format!("{:.0}% · {} / {}", p as f64, fmt_money(used), fmt_money(limit)),
-                            width,
-                        ),
+                    let right = format!(
+                        "{:.0}% · {} / {}",
+                        p as f64,
+                        fmt_money(used),
+                        fmt_money(limit)
                     );
+                    if compact {
+                        body.push(compact_meter("key budget", p as f64 / 100.0, right, width));
+                    } else {
+                        body.push(meter_line("key budget", p as f64 / 100.0, right, width));
+                    }
                 }
-            }
-            // daily / weekly / monthly key spend (whenever the API reports it)
-            if or.usage_today > 0.0 || or.usage_week > 0.0 || or.usage_month > 0.0 {
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    f.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
+                if !compact {
+                    // daily / weekly / monthly key spend (whenever the API reports it)
+                    if or.usage_today > 0.0 || or.usage_week > 0.0 || or.usage_month > 0.0 {
+                        body.msg(
                             format!(
                                 "  spend  today {} · week {} · month {}",
                                 fmt_money(or.usage_today),
                                 fmt_money(or.usage_week),
                                 fmt_money(or.usage_month),
                             ),
-                            Style::default().fg(Color::DarkGray),
-                        ))),
-                        r,
-                    );
-                }
-            } else if or.key_limit_usd.is_none() && or.total_usage_usd > 0.0 {
-                // hint only when there IS usage but no per-period data (limit off)
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    f.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            "  hint: set a key spending limit to see today/week/month spend",
-                            Style::default().fg(Color::DarkGray),
-                        ))),
-                        r,
-                    );
-                }
-            }
-            // per-model usage from the web dashboard (or_sync cache)
-            if let Some(u) = &snap.or_usage {
-                let now_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let stale = crate::openrouter::is_stale(u, now_unix);
-                if let Some(r) = next_slot(&mut y, 1, max_y) {
-                    let r = Rect::new(area.x, r.y, area.width, r.height);
-                    f.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
+                            Color::DarkGray,
+                            false,
+                        );
+                    } else if or.key_limit_usd.is_none() && or.total_usage_usd > 0.0 {
+                        // hint only when there IS usage but no per-period data (limit off)
+                        body.msg(
+                            "  hint: set a key spending limit to see today/week/month spend".into(),
+                            Color::DarkGray,
+                            false,
+                        );
+                    }
+                    // per-model usage from the web dashboard (or_sync cache)
+                    if let Some(u) = &snap.or_usage {
+                        let now_unix = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let stale = crate::openrouter::is_stale(u, now_unix);
+                        body.msg(
                             format!(
                                 "  month {}{}",
                                 fmt_money(u.month_total),
                                 if stale { " · stale — press R" } else { "" },
                             ),
-                            Style::default().fg(Color::DarkGray),
-                        ))),
-                        r,
-                    );
-                }
-                for m in u.month_models.iter().take(3) {
-                    if let Some(r) = next_slot(&mut y, 1, max_y) {
-                        let r = Rect::new(area.x, r.y, area.width, r.height);
-                        put(f, r, model_line(&m.label, m.tokens, m.cost, width));
-                    }
-                }
-                if !u.today_models.is_empty() {
-                    if let Some(r) = next_slot(&mut y, 1, max_y) {
-                        let r = Rect::new(area.x, r.y, area.width, r.height);
-                        f.render_widget(
-                            Paragraph::new(Line::from(Span::styled(
-                                format!("  today {}", fmt_money(u.today_total)),
-                                Style::default().fg(Color::DarkGray),
-                            ))),
-                            r,
+                            Color::DarkGray,
+                            false,
                         );
-                    }
-                }
-                for m in u.today_models.iter().take(2) {
-                    if let Some(r) = next_slot(&mut y, 1, max_y) {
-                        let r = Rect::new(area.x, r.y, area.width, r.height);
-                        put(f, r, model_line(&m.label, m.tokens, m.cost, width));
+                        for m in u.month_models.iter().take(3) {
+                            body.push(model_line(&m.label, m.tokens, m.cost, width));
+                        }
+                        if !u.today_models.is_empty() {
+                            body.msg(
+                                format!("  today {}", fmt_money(u.today_total)),
+                                Color::DarkGray,
+                                false,
+                            );
+                        }
+                        for m in u.today_models.iter().take(2) {
+                            body.push(model_line(&m.label, m.tokens, m.cost, width));
+                        }
                     }
                 }
             }
         }
     }
+    body
 }
 
+/// Render the body with scrolling: clip to the viewport, clamp the scroll
+/// offset, and overlay ▲/▼ indicators when content is cut off.
+fn draw_body(f: &mut Frame, area: Rect, body: &BodyLines, scroll: &mut usize) {
+    let total = body.lines.len();
+    if total == 0 {
+        return;
+    }
+    let viewport = area.height.max(1) as usize;
+    let max_scroll = total.saturating_sub(viewport);
+    let s = (*scroll).min(max_scroll);
+    *scroll = s;
+    let visible: Vec<Line<'static>> = body.lines.iter().skip(s).take(viewport).cloned().collect();
+    let shown = visible.len();
+    f.render_widget(Paragraph::new(visible), area);
+    if s > 0 {
+        overlay_corner(f, area, "▲", true);
+    }
+    if s + shown < total {
+        overlay_corner(f, area, &format!("▼ {} more", total - s - shown), false);
+    }
+}
 /// Provider row: bold name, body, optional right-aligned tail (cost / plan).
 /// Everything is clipped to `width` with an ellipsis instead of ratatui's raw
 /// buffer clip, so narrow panes never slice a word mid-glyph.
@@ -1335,20 +1752,32 @@ fn title_line(name: &str, body: &str, tail: &str, width: usize) -> Line<'static>
     let used = name_w + 2 + body.chars().count() + tail_w;
     let pad = width.saturating_sub(used);
     let mut spans = vec![
-        Span::styled(name.to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            name.to_string(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  ".to_string()),
         Span::raw(body),
     ];
     if !tail.is_empty() {
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(tail.to_string(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            tail.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     Line::from(spans)
 }
 
 /// Indented detail row: dim `  · name` with tokens right-aligned.
 fn item_line(name: &str, tokens: u64, width: usize) -> Line<'static> {
-    let right = if tokens > 0 { fmt_tok(tokens) } else { String::new() };
+    let right = if tokens > 0 {
+        fmt_tok(tokens)
+    } else {
+        String::new()
+    };
     let left = format!("    · {name}");
     let left_max = width.saturating_sub(right.chars().count() + 2).max(1);
     let left = fit_width(&left, left_max);
@@ -1389,11 +1818,20 @@ fn model_line(label: &str, tokens: u64, cost: f64, width: usize) -> Line<'static
 /// `  budget  10.00M  █████████░░░ 46%` — same bar style as the Copilot quota
 /// rows below, with the `%` right-aligned to `width`.
 fn budget_line(label: &str, total: u64, budget: u64, width: usize) -> Line<'static> {
-    let frac = if budget > 0 { total as f64 / budget as f64 } else { 0.0 }.clamp(0.0, 1.0);
+    let frac = if budget > 0 {
+        total as f64 / budget as f64
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
     let color = bar_color(frac);
     let bar = crate::model::bar(frac, 20);
     // fixed-width label column, same as meter_line, so bars line up vertically
-    let left = format!("  {:<RLEN$}", format!("{label} {}", crate::model::fmt_tok(budget)), RLEN = BAR_LABEL_W);
+    let left = format!(
+        "  {:<RLEN$}",
+        format!("{label} {}", crate::model::fmt_tok(budget)),
+        RLEN = BAR_LABEL_W
+    );
     let right = format!("{:.0}%", frac * 100.0);
     // left + bar + pad + right must fit in `width`
     let pad = width
@@ -1403,7 +1841,10 @@ fn budget_line(label: &str, total: u64, budget: u64, width: usize) -> Line<'stat
         Span::styled(left, Style::default().fg(Color::DarkGray)),
         Span::styled(bar, Style::default().fg(color)),
         Span::raw(" ".repeat(pad)),
-        Span::styled(right, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            right,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -1423,7 +1864,10 @@ fn meter_line(name: &str, frac: f64, right: String, width: usize) -> Line<'stati
         Span::styled(left, Style::default().fg(Color::DarkGray)),
         Span::styled(bar, Style::default().fg(color)),
         Span::raw(" ".repeat(pad)),
-        Span::styled(right, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            right,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -1482,11 +1926,26 @@ mod tests {
         assert_eq!((layout[2].2, layout[2].3), (28, 37));
 
         let rect = Rect::new(0, 20, 80, 2);
-        assert!(matches!(mouse_to_action(&click(5, 20), &rect), Some(Action::Connect)));
-        assert!(matches!(mouse_to_action(&click(0, 20), &rect), Some(Action::Connect)));
-        assert!(matches!(mouse_to_action(&click(10, 20), &rect), Some(Action::Connect)));
-        assert!(matches!(mouse_to_action(&click(20, 20), &rect), Some(Action::Refresh)));
-        assert!(matches!(mouse_to_action(&click(33, 20), &rect), Some(Action::Close)));
+        assert!(matches!(
+            mouse_to_action(&click(5, 20), &rect),
+            Some(Action::Connect)
+        ));
+        assert!(matches!(
+            mouse_to_action(&click(0, 20), &rect),
+            Some(Action::Connect)
+        ));
+        assert!(matches!(
+            mouse_to_action(&click(10, 20), &rect),
+            Some(Action::Connect)
+        ));
+        assert!(matches!(
+            mouse_to_action(&click(20, 20), &rect),
+            Some(Action::Refresh)
+        ));
+        assert!(matches!(
+            mouse_to_action(&click(33, 20), &rect),
+            Some(Action::Close)
+        ));
         // off the button row -> not clickable
         assert!(mouse_to_action(&click(5, 21), &rect).is_none());
         // gap between labels (separator) -> none
@@ -1512,21 +1971,54 @@ mod tests {
         let mut next = Instant::now();
 
         // starts on index 0
-        let Modal::Menu(menu) = modal.as_ref().unwrap() else { panic!() };
+        let Modal::Menu(menu) = modal.as_ref().unwrap() else {
+            panic!()
+        };
         assert_eq!(menu.selected, 0);
 
         // down -> 1
-        handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()), &mut modal, &mut next, &cfg, &snap).unwrap();
-        let Modal::Menu(menu) = modal.as_ref().unwrap() else { panic!() };
+        handle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut 0usize,
+            &mut CollapseState::default(),
+        )
+        .unwrap();
+        let Modal::Menu(menu) = modal.as_ref().unwrap() else {
+            panic!()
+        };
         assert_eq!(menu.selected, 1);
 
         // up -> wraps back to 0
-        handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()), &mut modal, &mut next, &cfg, &snap).unwrap();
-        let Modal::Menu(menu) = modal.as_ref().unwrap() else { panic!() };
+        handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut 0usize,
+            &mut CollapseState::default(),
+        )
+        .unwrap();
+        let Modal::Menu(menu) = modal.as_ref().unwrap() else {
+            panic!()
+        };
         assert_eq!(menu.selected, 0);
 
         // Esc closes the modal
-        handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()), &mut modal, &mut next, &cfg, &snap).unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut 0usize,
+            &mut CollapseState::default(),
+        )
+        .unwrap();
         assert!(modal.is_none());
     }
 
@@ -1540,9 +2032,20 @@ mod tests {
         // in "sk-or-" must land in the key, never be eaten as "open page".
         let key = "sk-or-v1-0123456789abcdef0123456789abcdef";
         for ch in key.chars() {
-            handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()), &mut modal, &mut next, &cfg, &snap).unwrap();
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+                &mut modal,
+                &mut next,
+                &cfg,
+                &snap,
+                &mut 0usize,
+                &mut CollapseState::default(),
+            )
+            .unwrap();
         }
-        let Modal::Login(ls) = modal.as_ref().unwrap() else { panic!() };
+        let Modal::Login(ls) = modal.as_ref().unwrap() else {
+            panic!()
+        };
         assert_eq!(ls.input, key);
     }
 
@@ -1578,40 +2081,236 @@ mod tests {
     }
 
     #[test]
+    fn folding_removes_detail_rows_but_keeps_title() {
+        let mut snap = Snapshot::default();
+        snap.claude.msgs = 3;
+        snap.claude.has_token_data = true;
+        snap.claude.tokens.input = 1000;
+        snap.claude.items.push(crate::model::Item {
+            name: "proj-a".into(),
+            tokens: crate::model::Tokens {
+                input: 500,
+                ..Default::default()
+            },
+            cost: 0.0,
+            msgs: 0,
+        });
+        // the default structs start with needs_key=false; silence the
+        // unconfigured providers so only Claude is active
+        snap.opencode_go.needs_key = true;
+        snap.openrouter.needs_key = true;
+        let cfg = crate::config::load();
+
+        // open: title + budget + item rows, all mapped to the Claude section
+        let open = build_body(&cfg, &snap, CollapseState::default(), 120);
+        assert_eq!(open.lines.len(), 3);
+        assert_eq!(open.section_at(0), Some(Section::Claude));
+        assert_eq!(open.section_at(2), Some(Section::Claude));
+
+        // folded: only the (dimmed) title row remains
+        let mut folded = CollapseState::default();
+        folded.toggle(Section::Claude);
+        assert!(folded.collapsed(Section::Claude));
+        let closed = build_body(&cfg, &snap, folded, 120);
+        assert_eq!(closed.lines.len(), 1);
+        assert_eq!(closed.section_at(0), Some(Section::Claude));
+    }
+
+    #[test]
+    fn fold_hit_maps_marker_click_to_section() {
+        let mut snap = Snapshot::default();
+        snap.claude.msgs = 1;
+        snap.claude.has_token_data = true;
+        snap.opencode_go.needs_key = true;
+        snap.openrouter.needs_key = true;
+        let cfg = crate::config::load();
+        let body = build_body(&cfg, &snap, CollapseState::default(), 120);
+        assert_eq!(body.sections.len(), body.lines.len());
+
+        // click the marker column on the second body row (Claude's budget row)
+        let rect = Rect::new(0, 2, 120, 20);
+        let m = click(0, rect.y + 1);
+        assert_eq!(body_fold_hit(&m, rect, 0, &body), Some(Section::Claude));
+        // clicks outside the marker zone / outside the pane miss
+        let wide = click(5, rect.y + 1);
+        assert_eq!(body_fold_hit(&wide, rect, 0, &body), None);
+        let below = click(0, rect.y + rect.height);
+        assert_eq!(body_fold_hit(&below, rect, 0, &body), None);
+    }
+
+    #[test]
+    fn digit_key_toggles_a_section() {
+        let cfg = crate::config::load();
+        let mut modal: Option<Modal> = None;
+        let mut next = Instant::now();
+        let mut scroll = 0usize;
+        let mut folded = CollapseState::default();
+        let snap = Snapshot::default();
+        // '2' = Codex
+        handle_key(
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+        )
+        .unwrap();
+        assert!(folded.collapsed(Section::Codex));
+        // 'q' quits, menu keys still work with the new signature elsewhere
+        let quit = handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+        )
+        .unwrap();
+        assert!(quit);
+    }
+
+    #[test]
+    fn scroll_keys_are_sticky_clamped_by_render() {
+        // j/k move the offset; rendering clamps it to the available lines
+        let mut scroll = 5usize;
+        let cfg = crate::config::load();
+        let mut modal: Option<Modal> = None;
+        let mut next = Instant::now();
+        let mut folded = CollapseState::default();
+        let snap = Snapshot::default();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+        )
+        .unwrap();
+        assert_eq!(scroll, 6);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+        )
+        .unwrap();
+        assert_eq!(scroll, 5);
+    }
+
+    #[test]
+    fn dashboard_renders_fold_markers_and_scroll_indicator() {
+        use ratatui::backend::TestBackend;
+
+        let mut snap = Snapshot::default();
+        snap.claude.msgs = 1;
+        snap.claude.has_token_data = true;
+        snap.opencode_go.needs_key = true;
+        snap.openrouter.needs_key = true;
+        snap.grok.needs_login = true;
+        for i in 0..10 {
+            snap.claude.items.push(crate::model::Item {
+                name: format!("proj-{i}"),
+                tokens: Default::default(),
+                cost: 0.0,
+                msgs: 0,
+            });
+        }
+        let cfg = crate::config::load();
+        let body = build_body(&cfg, &snap, CollapseState::default(), 80);
+        // many rows → content overflows a 3-row pane
+
+        let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        let mut scroll = 0usize;
+        term.draw(|f| draw_body(f, f.area(), &body, &mut scroll))
+            .unwrap();
+        let buf = term.backend().buffer();
+        // fold marker on the first row: key + triangle before the name
+        assert_eq!(buf.get(0, 0).symbol(), "1");
+        assert_eq!(buf.get(1, 0).symbol(), "▾");
+        // scrolled to top → bottom-right shows the ▼ more indicator
+        let txt: String = buf
+            .content
+            .iter()
+            .skip(2 * 80)
+            .take(80)
+            .map(|c| c.symbol())
+            .collect();
+        assert!(txt.trim_end().ends_with("▼ 1 more"), "got: {txt:?}");
+
+        // scrolling down clamps and shows both indicators
+        let mut scroll = 9usize;
+        term.draw(|f| draw_body(f, f.area(), &body, &mut scroll))
+            .unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(scroll, 1); // max_scroll = total(4) - viewport(3)
+        let top_row: String = buf.content.iter().take(80).map(|c| c.symbol()).collect();
+        assert!(top_row.trim_end().ends_with("▲"), "got: {top_row:?}");
+    }
+
+    #[test]
     fn menu_status_strings_are_produced() {
         let mut snap = Snapshot::default();
-        snap.copilot = Status::NeedsLogin { hint: "login".into() };
+        snap.copilot = Status::NeedsLogin {
+            hint: "login".into(),
+        };
         snap.grok.needs_login = true;
         snap.openrouter.needs_key = true;
         snap.opencode_go.needs_key = true;
-        let Modal::Menu(menu) = open_menu(&snap) else { panic!() };
+        let Modal::Menu(menu) = open_menu(&snap) else {
+            panic!()
+        };
         assert_eq!(menu.items.len(), 8);
 
-        let MenuEntry::Provider(p0) = &menu.items[0] else { panic!() };
+        let MenuEntry::Provider(p0) = &menu.items[0] else {
+            panic!()
+        };
         assert_eq!(p0.name, "GitHub Copilot");
         assert!(p0.status.contains("needs login"));
-        let MenuEntry::Provider(p1) = &menu.items[1] else { panic!() };
+        let MenuEntry::Provider(p1) = &menu.items[1] else {
+            panic!()
+        };
         assert_eq!(p1.name, "Grok (xAI)");
         assert!(p1.status.contains("needs login"));
-        let MenuEntry::Provider(p2) = &menu.items[2] else { panic!() };
+        let MenuEntry::Provider(p2) = &menu.items[2] else {
+            panic!()
+        };
         assert_eq!(p2.name, "OpenRouter");
         // default snapshot has no OpenRouter key -> needs API key
         assert!(p2.status.contains("needs API key"));
-        let MenuEntry::Provider(p3) = &menu.items[3] else { panic!() };
+        let MenuEntry::Provider(p3) = &menu.items[3] else {
+            panic!()
+        };
         assert_eq!(p3.name, "OpenCode Go");
         // default snapshot has no opencode key -> needs key
         assert!(p3.status.contains("needs key"));
         // individual logouts, then the all-in-one
-        assert!(matches!(menu.items[4], MenuEntry::Logout(LogoutKind::Copilot)));
-        assert!(matches!(menu.items[5], MenuEntry::Logout(LogoutKind::OpenRouter)));
-        assert!(matches!(menu.items[6], MenuEntry::Logout(LogoutKind::OpenCodeGo)));
+        assert!(matches!(
+            menu.items[4],
+            MenuEntry::Logout(LogoutKind::Copilot)
+        ));
+        assert!(matches!(
+            menu.items[5],
+            MenuEntry::Logout(LogoutKind::OpenRouter)
+        ));
+        assert!(matches!(
+            menu.items[6],
+            MenuEntry::Logout(LogoutKind::OpenCodeGo)
+        ));
         assert!(matches!(menu.items[7], MenuEntry::Logout(LogoutKind::All)));
     }
 
     #[test]
     fn releasing_or_dragging_never_dismisses_the_modal() {
-        let footer = Rect::new(0, 20, 80, 2);       // row 20
-        let mrect = Rect::new(10, 5, 50, 16);        // menu modal open
+        let footer = Rect::new(0, 20, 80, 2); // row 20
+        let mrect = Rect::new(10, 5, 50, 16); // menu modal open
         let items = Some(2usize);
 
         // Hold-then-release after opening Connect must keep the modal open:
@@ -1622,7 +2321,10 @@ mod tests {
             row: 20,
             modifiers: KeyModifiers::empty(),
         };
-        assert_eq!(decide_mouse(&up, items, Some(mrect), &footer), MouseDecision::None);
+        assert_eq!(
+            decide_mouse(&up, items, Some(mrect), &footer),
+            MouseDecision::None
+        );
 
         // A tiny drag (Down+move kind) while held must also be ignored.
         let drag = MouseEvent {
@@ -1631,7 +2333,10 @@ mod tests {
             row: 8,
             modifiers: KeyModifiers::empty(),
         };
-        assert_eq!(decide_mouse(&drag, items, Some(mrect), &footer), MouseDecision::None);
+        assert_eq!(
+            decide_mouse(&drag, items, Some(mrect), &footer),
+            MouseDecision::None
+        );
 
         // Release (Up) anywhere, even on a blank area, must not close it.
         let up_blank = MouseEvent {
@@ -1640,7 +2345,10 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::empty(),
         };
-        assert_eq!(decide_mouse(&up_blank, items, Some(mrect), &footer), MouseDecision::None);
+        assert_eq!(
+            decide_mouse(&up_blank, items, Some(mrect), &footer),
+            MouseDecision::None
+        );
     }
 
     #[test]
@@ -1684,9 +2392,18 @@ mod tests {
             row: 12,
             modifiers: KeyModifiers::empty(),
         };
-        assert_eq!(decide_mouse(&up, None, Some(mrect), &footer), MouseDecision::None);
+        assert_eq!(
+            decide_mouse(&up, None, Some(mrect), &footer),
+            MouseDecision::None
+        );
         // Footer Close / Refresh.
-        assert_eq!(decide_mouse(&click(33, 20), None, None, &footer), MouseDecision::Close);
-        assert_eq!(decide_mouse(&click(20, 20), None, None, &footer), MouseDecision::Refresh);
+        assert_eq!(
+            decide_mouse(&click(33, 20), None, None, &footer),
+            MouseDecision::Close
+        );
+        assert_eq!(
+            decide_mouse(&click(20, 20), None, None, &footer),
+            MouseDecision::Refresh
+        );
     }
 }

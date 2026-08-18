@@ -69,12 +69,15 @@ fn main() -> ExitCode {
                 "opencode" | "opencode-go" => {
                     use std::io::BufRead as _;
                     println!("▶ OpenCode Go API key");
-                    println!("  1) Find the key in the opencode console: https://opencode.ai/console → Keys");
+                    println!(
+                        "  1) Find the key in the opencode console: https://opencode.ai/console → Keys"
+                    );
                     println!("     (when using opencode-go from pi, it is already auto-detected)");
                     println!("  2) Or set OPENCODE_API_KEY=<sk-...> for this process.");
                     println!("Paste the key (sk-...) and press Enter:");
                     let mut key = String::new();
-                    if std::io::stdin().lock().read_line(&mut key).is_err() || key.trim().is_empty() {
+                    if std::io::stdin().lock().read_line(&mut key).is_err() || key.trim().is_empty()
+                    {
                         eprintln!("no key given — aborting (use OPENCODE_API_KEY env instead)");
                         return ExitCode::FAILURE;
                     }
@@ -87,10 +90,13 @@ fn main() -> ExitCode {
                     use std::io::BufRead as _;
                     println!("▶ OpenRouter API key");
                     println!("  1) Create a key: https://openrouter.ai/settings/keys");
-                    println!("  2) (optional) Set a key spending limit at https://openrouter.ai/settings/limits");
+                    println!(
+                        "  2) (optional) Set a key spending limit at https://openrouter.ai/settings/limits"
+                    );
                     println!("Paste the key (sk-or-v1-...) and press Enter:");
                     let mut key = String::new();
-                    if std::io::stdin().lock().read_line(&mut key).is_err() || key.trim().is_empty() {
+                    if std::io::stdin().lock().read_line(&mut key).is_err() || key.trim().is_empty()
+                    {
                         eprintln!("no key given — aborting (use OPENROUTER_API_KEY env instead)");
                         return ExitCode::FAILURE;
                     }
@@ -100,7 +106,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 _ => {
-                    eprintln!("unknown provider: {provider} (copilot | grok | openrouter | opencode)");
+                    eprintln!(
+                        "unknown provider: {provider} (copilot | grok | openrouter | opencode)"
+                    );
                     ExitCode::FAILURE
                 }
             }
@@ -128,10 +136,14 @@ fn main() -> ExitCode {
                     println!("✓ cleared saved OpenCode Go API key (auto-detection still applies)");
                 }
                 "grok" | "xai" => {
-                    println!("Grok keeps no token in this app — credentials live in ~/.grok/auth.json and are removed separately.");
+                    println!(
+                        "Grok keeps no token in this app — credentials live in ~/.grok/auth.json and are removed separately."
+                    );
                 }
                 other => {
-                    eprintln!("unknown logout target: {other} (all | copilot | openrouter | opencode | grok)");
+                    eprintln!(
+                        "unknown logout target: {other} (all | copilot | openrouter | opencode | grok)"
+                    );
                     return ExitCode::FAILURE;
                 }
             }

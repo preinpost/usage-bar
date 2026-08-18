@@ -24,9 +24,7 @@ pub fn parse_ts(v: &Value) -> Option<DateTime<Local>> {
             DateTime::parse_from_rfc3339(&format!("{norm}Z"))
                 .ok()
                 .map(|d| d.with_timezone(&Local))
-                .or_else(|| {
-                    Local.datetime_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok()
-                })
+                .or_else(|| Local.datetime_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok())
         }
         _ => None,
     }
@@ -56,7 +54,8 @@ pub fn window_start(reset_hour: u32) -> DateTime<Local> {
         .and_then(|d| d.with_second(0))
         .and_then(|d| d.with_nanosecond(0))
         .unwrap_or_else(|| {
-            Local.with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+            Local
+                .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
                 .single()
                 .unwrap_or(now)
         });
@@ -94,16 +93,27 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
         return out;
     }
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
         .unwrap_or_default();
     dirs.sort();
     for pdir in dirs {
         let entries = match std::fs::read_dir(&pdir) {
-            Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect::<Vec<_>>(),
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect::<Vec<_>>(),
             Err(_) => continue,
         };
         let mut item = Item {
-            name: pdir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            name: pdir
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
             ..Default::default()
         };
         for jf in entries {
@@ -116,13 +126,19 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
             let Ok(f) = File::open(&jf) else { continue };
             let reader = BufReader::new(f);
             for line in reader.lines().map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                let usage = v.get("usage")
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let usage = v
+                    .get("usage")
                     .or_else(|| v.get("message").and_then(|m| m.get("usage")))
                     .or_else(|| v.get("message").and_then(|m| m.get("modelUsage")))
                     .and_then(|u| if u.is_object() { Some(u) } else { None });
                 let Some(usage) = usage else { continue };
-                let ts = v.get("timestamp").or_else(|| v.get("ts")).and_then(parse_ts);
+                let ts = v
+                    .get("timestamp")
+                    .or_else(|| v.get("ts"))
+                    .and_then(parse_ts);
                 if let Some(t) = ts {
                     if t < start {
                         continue;
@@ -143,7 +159,8 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
             out.items.push(item);
         }
     }
-    out.items.sort_by(|a, b| b.tokens.total().cmp(&a.tokens.total()));
+    out.items
+        .sort_by(|a, b| b.tokens.total().cmp(&a.tokens.total()));
     out.has_token_data = out.tokens.total() > 0;
     out
 }
@@ -157,8 +174,12 @@ pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
         if let Ok(f) = File::open(&history) {
             let reader = BufReader::new(f);
             for line in reader.lines().map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                let Some(ts) = v.get("ts").and_then(parse_ts) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let Some(ts) = v.get("ts").and_then(parse_ts) else {
+                    continue;
+                };
                 if ts >= start {
                     out.turns += 1;
                 }
@@ -179,16 +200,18 @@ pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
             let Ok(f) = File::open(p) else { continue };
             let reader = BufReader::new(f);
             for line in reader.lines().map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
                 let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 let payload = v.get("payload");
                 if typ == "session_meta" {
-                    let ts = payload
-                        .and_then(|p| p.get("timestamp"))
-                        .and_then(parse_ts);
+                    let ts = payload.and_then(|p| p.get("timestamp")).and_then(parse_ts);
                     if let Some(t) = ts {
                         if t >= start {
-                            if let Some(id) = payload.and_then(|p| p.get("id")).and_then(|x| x.as_str()) {
+                            if let Some(id) =
+                                payload.and_then(|p| p.get("id")).and_then(|x| x.as_str())
+                            {
                                 session_ids.push(id.to_string());
                             }
                         }
@@ -204,12 +227,21 @@ pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
                         }
                     }
                     // some builds record tokens/cost inside payload
-                    if let Some(u) = payload.and_then(|p| p.get("usage"))
+                    if let Some(u) = payload
+                        .and_then(|p| p.get("usage"))
                         .or_else(|| payload.and_then(|p| p.get("tokens")))
                         .or_else(|| payload.and_then(|p| p.get("cost")))
                     {
-                        out.tokens.input += u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64;
-                        out.tokens.output += u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0).max(0) as u64;
+                        out.tokens.input += u
+                            .get("prompt_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as u64;
+                        out.tokens.output += u
+                            .get("completion_tokens")
+                            .and_then(|x| x.as_i64())
+                            .unwrap_or(0)
+                            .max(0) as u64;
                         out.cost += u.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
                     }
                     out.turns += 1;
@@ -285,7 +317,11 @@ pub fn collect_opencode(start: DateTime<Local>) -> Option<LocalStats> {
         };
         out.items.push(item);
     }
-    out.items.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+    out.items.sort_by(|a, b| {
+        b.cost
+            .partial_cmp(&a.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.has_token_data = out.tokens.total() > 0;
     Some(out)
 }

@@ -56,7 +56,9 @@ pub enum Status {
 
 impl Default for Status {
     fn default() -> Self {
-        Status::NeedsLogin { hint: String::new() }
+        Status::NeedsLogin {
+            hint: String::new(),
+        }
     }
 }
 
@@ -256,7 +258,11 @@ pub fn bar(frac: f64, width: usize) -> String {
 
 /// One line like `budget 10.00M  ██░░░░ 5%`
 pub fn budget_line(label: &str, total: u64, budget: u64) -> String {
-    let frac = if budget > 0 { total as f64 / budget as f64 } else { 0.0 };
+    let frac = if budget > 0 {
+        total as f64 / budget as f64
+    } else {
+        0.0
+    };
     format!(
         "{label} {}  {} {:.0}%",
         fmt_tok(budget),
@@ -289,7 +295,13 @@ mod tests {
     use super::*;
     #[test]
     fn tokens_sum() {
-        let t = Tokens { input: 1, output: 2, cache_read: 3, cache_write: 4, reasoning: 5 };
+        let t = Tokens {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
         assert_eq!(t.total(), 15);
     }
 

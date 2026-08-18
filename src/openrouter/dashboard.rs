@@ -13,7 +13,7 @@ use cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha1::Sha1;
 
 use crate::config::Config;
@@ -28,7 +28,9 @@ const ANALYTICS_URL: &str = "https://openrouter.ai/api/frontend/v1/private/analy
 const COOKIE_HOST: &str = "%openrouter.ai%";
 
 fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
 fn chrome_cookie_db() -> PathBuf {
@@ -45,7 +47,15 @@ fn chrome_cookie_db() -> PathBuf {
 /// password (salt `saltysalt`, 1003 rounds).
 fn chrome_key() -> Result<[u8; 16], String> {
     let out = std::process::Command::new("security")
-        .args(["-q", "find-generic-password", "-w", "-a", "Chrome", "-s", "Chrome Safe Storage"])
+        .args([
+            "-q",
+            "find-generic-password",
+            "-w",
+            "-a",
+            "Chrome",
+            "-s",
+            "Chrome Safe Storage",
+        ])
         .output()
         .map_err(|e| format!("keychain call failed: {e}"))?;
     if !out.status.success() {
@@ -125,7 +135,10 @@ fn iso(dt: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn query(cookie_header: &str, start: &str, end: &str) -> Result<Value, String> {
@@ -143,7 +156,10 @@ fn query(cookie_header: &str, start: &str, end: &str) -> Result<Value, String> {
         &[
             ("origin", "https://openrouter.ai"),
             ("referer", "https://openrouter.ai/activity"),
-            ("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
+            (
+                "user-agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            ),
             ("cookie", cookie_header),
         ],
         20,
@@ -225,8 +241,11 @@ pub fn sync_now(_cfg: &Config) -> Result<String, String> {
     let dir = crate::config::state_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("state dir: {e}"))?;
     let path = dir.join("openrouter-usage.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&payload).map_err(|e| format!("json: {e}"))?)
-        .map_err(|e| format!("write cache: {e}"))?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("json: {e}"))?,
+    )
+    .map_err(|e| format!("write cache: {e}"))?;
 
     let t = payload["today"]["total"].as_f64().unwrap_or(0.0);
     let m = payload["month"]["total"].as_f64().unwrap_or(0.0);

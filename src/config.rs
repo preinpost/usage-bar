@@ -25,12 +25,19 @@ pub struct Prices {
 
 impl Default for Prices {
     fn default() -> Self {
-        Self { input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 3.75 }
+        Self {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.30,
+            cache_write: 3.75,
+        }
     }
 }
 
 fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
 pub fn plugin_config_dir() -> PathBuf {
@@ -62,7 +69,10 @@ pub fn load() -> Config {
     };
     let candidates = [
         plugin_config_dir().join("config.json"),
-        home().join(".config").join("codexbar-status").join("config.json"),
+        home()
+            .join(".config")
+            .join("codexbar-status")
+            .join("config.json"),
     ];
     for p in candidates {
         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -73,7 +83,10 @@ pub fn load() -> Config {
                 if let Some(n) = v.get("codex_daily_budget_tokens").and_then(|x| x.as_u64()) {
                     cfg.codex_budget = n;
                 }
-                if let Some(n) = v.get("opencode_daily_budget_tokens").and_then(|x| x.as_u64()) {
+                if let Some(n) = v
+                    .get("opencode_daily_budget_tokens")
+                    .and_then(|x| x.as_u64())
+                {
                     cfg.opencode_budget = n;
                 }
                 if let Some(n) = v.get("reset_hour").and_then(|x| x.as_u64()) {
@@ -121,11 +134,16 @@ pub fn codex_history_path() -> PathBuf {
     home().join(".codex").join("history.jsonl")
 }
 pub fn opencode_db_path() -> PathBuf {
-    home().join(".local").join("share").join("opencode").join("opencode.db")
+    home()
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("opencode.db")
 }
 pub fn grok_home() -> PathBuf {
     Path::new(
-        &std::env::var("GROK_HOME").unwrap_or_else(|_| home().join(".grok").to_string_lossy().to_string()),
+        &std::env::var("GROK_HOME")
+            .unwrap_or_else(|_| home().join(".grok").to_string_lossy().to_string()),
     )
     .to_path_buf()
 }

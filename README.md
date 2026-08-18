@@ -58,11 +58,15 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 | `l`              | start Copilot login                     |
 | `g`              | show Grok login instructions            |
 | `r`              | refresh now (+ resync OpenRouter cache) |
+| `1`–`7`          | fold/unfold that provider section       |
+| `j`/`k` or `↑`/`↓`| scroll the body (when it overflows)    |
+| `PgUp`/`PgDn`    | scroll by a page                        |
 | `↑`/`↓` / `k`/`j`| move in menus                           |
 | `Enter`          | select                                  |
 
 The footer buttons are clickable with the mouse; provider rows in the Connect
-menu are clickable too.
+menu are clickable too. On the dashboard, the fold marker (`1▾ …`) left of each
+provider title is clickable, and the mouse wheel scrolls the body.
 
 ## Credentials
 

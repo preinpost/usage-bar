@@ -11,12 +11,18 @@ use crate::model::GrokStatus;
 fn read_auth() -> Option<(String, String)> {
     // returns (token, email)
     let candidates = [
-        std::env::var("GROK_AUTH_FILE").ok().map(std::path::PathBuf::from),
+        std::env::var("GROK_AUTH_FILE")
+            .ok()
+            .map(std::path::PathBuf::from),
         Some(config::grok_home().join("auth.json")),
     ];
     for p in candidates.into_iter().flatten() {
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         let Some(obj) = v.as_object() else { continue };
         let keys: Vec<&String> = obj.keys().collect();
         for pref in ["https://auth.x.ai::", "https://accounts.x.ai/sign-in"] {
@@ -24,8 +30,12 @@ fn read_auth() -> Option<(String, String)> {
                 if !k.starts_with(pref) {
                     continue;
                 }
-                let Some(ent) = obj.get(*k).and_then(|x| x.as_object()) else { continue };
-                let Some(key) = ent.get("key").and_then(|x| x.as_str()) else { continue };
+                let Some(ent) = obj.get(*k).and_then(|x| x.as_object()) else {
+                    continue;
+                };
+                let Some(key) = ent.get("key").and_then(|x| x.as_str()) else {
+                    continue;
+                };
                 if key.is_empty() {
                     continue;
                 }
@@ -36,7 +46,11 @@ fn read_auth() -> Option<(String, String)> {
                         continue; // expired, try next entry
                     }
                 }
-                let email = ent.get("email").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let email = ent
+                    .get("email")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 return Some((key.to_string(), email));
             }
         }
@@ -57,24 +71,35 @@ pub fn scan_sessions(start: DateTime<Local>) -> (u64, u64) {
         if p.file_name().and_then(|s| s.to_str()) != Some("signals.json") {
             continue;
         }
-        let Ok(md) = std::fs::metadata(p) else { continue };
+        let Ok(md) = std::fs::metadata(p) else {
+            continue;
+        };
         if let Ok(mt) = md.modified() {
             let t: DateTime<Local> = mt.into();
             if t < start {
                 continue;
             }
         }
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(text) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         n += 1;
-        toks += v.get("contextTokensUsed").and_then(|x| x.as_u64()).unwrap_or(0);
+        toks += v
+            .get("contextTokensUsed")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
     }
     (n, toks)
 }
 
 pub fn collect(start: DateTime<Local>) -> GrokStatus {
     let (local_sessions, local_tokens) = scan_sessions(start);
-    let token = read_auth().map(|(t, _)| t).or_else(|| std::env::var("GROK_OAUTH_TOKEN").ok());
+    let token = read_auth()
+        .map(|(t, _)| t)
+        .or_else(|| std::env::var("GROK_OAUTH_TOKEN").ok());
     let Some(token) = token else {
         return GrokStatus {
             needs_login: true,
@@ -104,10 +129,20 @@ pub fn collect(start: DateTime<Local>) -> GrokStatus {
         }
     };
     let cfgobj = d.get("config").and_then(|x| x.as_object());
-    let mut pct = cfgobj.and_then(|c| c.get("creditUsagePercent")).and_then(|x| x.as_f64());
+    let mut pct = cfgobj
+        .and_then(|c| c.get("creditUsagePercent"))
+        .and_then(|x| x.as_f64());
     if pct.is_none() {
-        let used = d.get("onDemandUsed").and_then(|x| x.get("val")).and_then(|x| x.as_i64()).unwrap_or(0);
-        let cap = d.get("onDemandCap").and_then(|x| x.get("val")).and_then(|x| x.as_i64()).unwrap_or(1);
+        let used = d
+            .get("onDemandUsed")
+            .and_then(|x| x.get("val"))
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
+        let cap = d
+            .get("onDemandCap")
+            .and_then(|x| x.get("val"))
+            .and_then(|x| x.as_i64())
+            .unwrap_or(1);
         if cap > 0 {
             pct = Some(used as f64 / cap as f64 * 100.0);
         }
@@ -117,9 +152,7 @@ pub fn collect(start: DateTime<Local>) -> GrokStatus {
         .and_then(|c| c.get("end"))
         .or_else(|| cfgobj.and_then(|c| c.get("billingPeriodEnd")))
         .and_then(|x| x.as_str())
-        .map(|s| {
-            s.chars().take(10).collect()
-        });
+        .map(|s| s.chars().take(10).collect());
     if pct.is_none() && resets.is_none() {
         return GrokStatus {
             needs_login: true,

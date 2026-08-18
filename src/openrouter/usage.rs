@@ -28,7 +28,11 @@ fn models(arr: &Value) -> Vec<ModelUsage> {
                     }
                     let cost = m.get("cost").and_then(|x| x.as_f64()).unwrap_or(0.0);
                     let tokens = as_u64(m.get("tokens"));
-                    Some(ModelUsage { label, cost, tokens })
+                    Some(ModelUsage {
+                        label,
+                        cost,
+                        tokens,
+                    })
                 })
                 .collect()
         })
@@ -43,7 +47,8 @@ fn as_u64(v: Option<&Value>) -> u64 {
 }
 
 fn x_str_u64(v: Option<&Value>) -> Option<u64> {
-    v.and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok())
+    v.and_then(|x| x.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 /// Read the usage cache written by `crate::or_sync::sync_now`.
@@ -59,9 +64,17 @@ pub fn load() -> Option<OpenRouterUsage> {
     Some(OpenRouterUsage {
         fetched_at: v.get("fetched_at").and_then(|x| x.as_i64()).unwrap_or(0),
         today_total: get_total("today"),
-        today_models: v.get("today").and_then(|x| x.get("models")).map(models).unwrap_or_default(),
+        today_models: v
+            .get("today")
+            .and_then(|x| x.get("models"))
+            .map(models)
+            .unwrap_or_default(),
         month_total: get_total("month"),
-        month_models: v.get("month").and_then(|x| x.get("models")).map(models).unwrap_or_default(),
+        month_models: v
+            .get("month")
+            .and_then(|x| x.get("models"))
+            .map(models)
+            .unwrap_or_default(),
     })
 }
 

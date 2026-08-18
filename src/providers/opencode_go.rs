@@ -59,7 +59,10 @@ fn load_key_from(home: &str, cfg: &Config) -> Option<String> {
         return Some(k);
     }
     // 2) pi's credential store — opencode-go used from pi keeps its key here
-    if let Some(k) = auth_key(&PathBuf::from(home).join(".pi/agent/auth.json"), ["opencode-go", "opencode"]) {
+    if let Some(k) = auth_key(
+        &PathBuf::from(home).join(".pi/agent/auth.json"),
+        ["opencode-go", "opencode"],
+    ) {
         return Some(k);
     }
     // 3) opencode CLI auth
@@ -89,22 +92,36 @@ pub fn clear_key(cfg: &Config) {
 }
 
 fn file_key(p: &Path) -> Option<String> {
-    let Ok(text) = std::fs::read_to_string(p) else { return None };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else { return None };
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return None;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return None;
+    };
     let k = v
         .get("api_key")
         .or_else(|| v.get("key"))
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .trim();
-    if k.is_empty() { None } else { Some(k.to_string()) }
+    if k.is_empty() {
+        None
+    } else {
+        Some(k.to_string())
+    }
 }
 
 fn auth_key<const N: usize>(path: &Path, prefs: [&str; N]) -> Option<String> {
-    let Ok(text) = std::fs::read_to_string(path) else { return None };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else { return None };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return None;
+    };
     for pref in prefs {
-        let Some(ent) = v.get(pref).and_then(|x| x.as_object()) else { continue };
+        let Some(ent) = v.get(pref).and_then(|x| x.as_object()) else {
+            continue;
+        };
         let k = ent.get("key").and_then(|x| x.as_str()).unwrap_or("").trim();
         if !k.is_empty() {
             return Some(k.to_string());
@@ -120,16 +137,29 @@ fn parse_window(v: &Value) -> Option<GoUsageWindow> {
         .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
         .unwrap_or(0)
         .min(100) as u8;
-    let resets_at = v.get("resetsAt").and_then(|x| x.as_str()).map(|s| s.to_string());
-    Some(GoUsageWindow { status, percent, resets_at })
+    let resets_at = v
+        .get("resetsAt")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    Some(GoUsageWindow {
+        status,
+        percent,
+        resets_at,
+    })
 }
 
 pub fn collect(cfg: &Config) -> GoUsageStatus {
     let Some(key) = load_key(cfg) else {
-        return GoUsageStatus { needs_key: true, ..Default::default() };
+        return GoUsageStatus {
+            needs_key: true,
+            ..Default::default()
+        };
     };
     let auth = format!("Bearer {key}");
-    let headers = [("authorization", auth.as_str()), ("accept", "application/json")];
+    let headers = [
+        ("authorization", auth.as_str()),
+        ("accept", "application/json"),
+    ];
 
     let d = match http::get_json(USAGE_URL, &headers, 8) {
         Ok(v) => v,
@@ -143,7 +173,11 @@ pub fn collect(cfg: &Config) -> GoUsageStatus {
                 "HTTP 403" => "no Go subscription (free tier)".into(),
                 other => other.to_string(),
             };
-            return GoUsageStatus { needs_key: false, error: Some(msg), ..Default::default() };
+            return GoUsageStatus {
+                needs_key: false,
+                error: Some(msg),
+                ..Default::default()
+            };
         }
     };
     let usage = d.get("usage").and_then(|x| x.as_object());
@@ -169,7 +203,9 @@ pub fn format_resets_at(iso: Option<&str>) -> String {
                 .ok()
                 .and_then(|d| Local.from_local_datetime(&d).single())
         });
-    let Some(t) = parsed else { return iso.chars().take(16).collect() };
+    let Some(t) = parsed else {
+        return iso.chars().take(16).collect();
+    };
     let now = Local::now();
     let same_day = (t.year(), t.month(), t.day()) == (now.year(), now.month(), now.day());
     if same_day {
@@ -187,7 +223,8 @@ mod tests {
     fn tmp_dir() -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, AO::SeqCst);
-        let d = std::env::temp_dir().join(format!("codexbar-ogo-test-{}-{}", std::process::id(), n));
+        let d =
+            std::env::temp_dir().join(format!("codexbar-ogo-test-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -214,18 +251,31 @@ mod tests {
         // simulate a different workspace key provisioned by pi
         let pi_auth = home.join(".pi/agent/auth.json");
         std::fs::create_dir_all(pi_auth.parent().unwrap()).unwrap();
-        std::fs::write(&pi_auth, r#"{"opencode-go":{"type":"api","key":"sk-pi-workspace"}}"#).unwrap();
+        std::fs::write(
+            &pi_auth,
+            r#"{"opencode-go":{"type":"api","key":"sk-pi-workspace"}}"#,
+        )
+        .unwrap();
 
         // no saved key yet → auto-detected from pi
-        assert_eq!(load_key_from(home.to_str().unwrap(), &cfg).as_deref(), Some("sk-pi-workspace"));
+        assert_eq!(
+            load_key_from(home.to_str().unwrap(), &cfg).as_deref(),
+            Some("sk-pi-workspace")
+        );
 
         // save an explicit key → it wins
         save_key(&cfg, "sk-pasted");
-        assert_eq!(load_key_from(home.to_str().unwrap(), &cfg).as_deref(), Some("sk-pasted"));
+        assert_eq!(
+            load_key_from(home.to_str().unwrap(), &cfg).as_deref(),
+            Some("sk-pasted")
+        );
 
         // clearing falls back to auto-detection for pi again
         clear_key(&cfg);
-        assert_eq!(load_key_from(home.to_str().unwrap(), &cfg).as_deref(), Some("sk-pi-workspace"));
+        assert_eq!(
+            load_key_from(home.to_str().unwrap(), &cfg).as_deref(),
+            Some("sk-pi-workspace")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -247,7 +297,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(cfg.secrets_dir.join("opencode-go.json")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(cfg.secrets_dir.join("opencode-go.json"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(&dir);

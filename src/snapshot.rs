@@ -3,9 +3,9 @@
 use chrono::Local;
 
 use crate::config::Config;
-use crate::providers::{copilot, data, grok, opencode_go};
 use crate::model::{Snapshot, Status};
 use crate::openrouter;
+use crate::providers::{copilot, data, grok, opencode_go};
 
 pub fn snapshot(cfg: &Config) -> Snapshot {
     let start = data::window_start(cfg.reset_hour);
@@ -38,7 +38,11 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     let show_all = cfg.show_no_data_providers;
     let c_active = s.claude.msgs > 0 || s.claude.has_token_data;
     let x_active = s.codex.sessions > 0 || s.codex.turns > 0 || s.codex.has_token_data;
-    let o_active = s.opencode.as_ref().map(|o| o.sessions > 0 || o.has_token_data).unwrap_or(false);
+    let o_active = s
+        .opencode
+        .as_ref()
+        .map(|o| o.sessions > 0 || o.has_token_data)
+        .unwrap_or(false);
     let cp_active = matches!(&s.copilot, Status::Ok(_));
     let g_active = !s.grok.needs_login || s.grok.local_sessions > 0;
     let ogo_active = !s.opencode_go.needs_key;
@@ -47,8 +51,19 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     let mut out = String::new();
     let _ = write!(out, "╭ Usage · resets in {} ╮\n", s.countdown);
 
-    if !(show_all || c_active || x_active || o_active || cp_active || g_active || ogo_active || or_active) {
-        let _ = write!(out, "(no active providers — connect with `login` or set s API key)\n");
+    if !(show_all
+        || c_active
+        || x_active
+        || o_active
+        || cp_active
+        || g_active
+        || ogo_active
+        || or_active)
+    {
+        let _ = write!(
+            out,
+            "(no active providers — connect with `login` or set s API key)\n"
+        );
         return out;
     }
 
@@ -64,10 +79,19 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
             fmt_money(c.cost)
         );
         if c.tokens.total() > 0 || c.msgs > 0 {
-            let _ = write!(out, "  {}", crate::model::budget_line("budget", c.tokens.total(), cfg.claude_budget));
+            let _ = write!(
+                out,
+                "  {}",
+                crate::model::budget_line("budget", c.tokens.total(), cfg.claude_budget)
+            );
         }
         for item in c.items.iter().take(3) {
-            let _ = write!(out, "  · {}  {}\n", truncate(&item.name, 28), fmt_tok(item.tokens.total()));
+            let _ = write!(
+                out,
+                "  · {}  {}\n",
+                truncate(&item.name, 28),
+                fmt_tok(item.tokens.total())
+            );
         }
     }
 
@@ -75,9 +99,17 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     if show_all || x_active {
         let x = &s.codex;
         let token_s = if x.has_token_data {
-            format!("in {} out {} cache {}", fmt_tok(x.tokens.input), fmt_tok(x.tokens.output), fmt_tok(x.tokens.cache_read + x.tokens.cache_write))
+            format!(
+                "in {} out {} cache {}",
+                fmt_tok(x.tokens.input),
+                fmt_tok(x.tokens.output),
+                fmt_tok(x.tokens.cache_read + x.tokens.cache_write)
+            )
         } else {
-            format!("{} sessions · {} turns (no token data)", x.sessions, x.turns)
+            format!(
+                "{} sessions · {} turns (no token data)",
+                x.sessions, x.turns
+            )
         };
         let _ = write!(out, "Codex {token_s}   {}\n", fmt_money(x.cost));
     }
@@ -94,7 +126,12 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
                 fmt_money(o.cost)
             );
             for item in o.items.iter().take(2) {
-                let _ = write!(out, "  · {}  {}\n", truncate(&item.name, 28), fmt_tok(item.tokens.total()));
+                let _ = write!(
+                    out,
+                    "  · {}  {}\n",
+                    truncate(&item.name, 28),
+                    fmt_tok(item.tokens.total())
+                );
             }
         }
     }
@@ -103,7 +140,10 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     if show_all || ogo_active {
         use crate::providers::opencode_go::format_resets_at;
         if s.opencode_go.needs_key {
-            let _ = write!(out, "OpenCode Go — no key (pi auth.json / OPENCODE_API_KEY)\n");
+            let _ = write!(
+                out,
+                "OpenCode Go — no key (pi auth.json / OPENCODE_API_KEY)\n"
+            );
         } else if let Some(e) = &s.opencode_go.error {
             let _ = write!(out, "OpenCode Go — {e}\n");
         } else {
@@ -182,10 +222,17 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
                     "  key {p}% used · {}/{}{}\n",
                     fmt_money(used),
                     fmt_money(limit),
-                    if win.is_empty() { String::new() } else { format!(" · resets {win}") },
+                    if win.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · resets {win}")
+                    },
                 );
             }
-            if s.openrouter.usage_today > 0.0 || s.openrouter.usage_week > 0.0 || s.openrouter.usage_month > 0.0 {
+            if s.openrouter.usage_today > 0.0
+                || s.openrouter.usage_week > 0.0
+                || s.openrouter.usage_month > 0.0
+            {
                 let _ = write!(
                     out,
                     "  spend today {} · week {} · month {}\n",
@@ -194,7 +241,10 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
                     fmt_money(s.openrouter.usage_month),
                 );
             } else if s.openrouter.key_limit_usd.is_none() && s.openrouter.total_usage_usd > 0.0 {
-                let _ = write!(out, "  hint: set a key spending limit for daily/weekly/monthly spend\n");
+                let _ = write!(
+                    out,
+                    "  hint: set a key spending limit for daily/weekly/monthly spend\n"
+                );
             }
             // per-model usage from the web-dashboard scrub
             if let Some(u) = &s.or_usage {

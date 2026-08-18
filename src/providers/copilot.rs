@@ -67,7 +67,11 @@ pub fn load_token(cfg: &Config) -> Option<String> {
             .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
             .unwrap_or(0);
         if std::env::var("CODEBARX_DEBUG").is_ok() {
-            eprintln!("  found token, created={created} now={} expired={}", now(), created + 7 * 86400 < now());
+            eprintln!(
+                "  found token, created={created} now={} expired={}",
+                now(),
+                created + 7 * 86400 < now()
+            );
         }
         if tok.is_empty() || created + 7 * 86400 < now() {
             continue; // expired/empty -> try next location
@@ -165,7 +169,9 @@ pub fn device_login(cfg: &Config, progress: impl Fn(&str)) -> Option<String> {
 /// Fetch usage from the internal Copilot API.
 pub fn collect(cfg: &Config) -> Status {
     let Some(tok) = load_token(cfg) else {
-        return Status::NeedsLogin { hint: "login-copilot (L)".into() };
+        return Status::NeedsLogin {
+            hint: "login-copilot (L)".into(),
+        };
     };
     let auth = format!("token {tok}");
     let headers = [
@@ -180,24 +186,32 @@ pub fn collect(cfg: &Config) -> Status {
         Ok(v) => v,
         Err(e) => {
             if e.starts_with("HTTP 401") || e.starts_with("HTTP 403") {
-                return Status::NeedsLogin { hint: "token expired — login-copilot (L)".into() };
+                return Status::NeedsLogin {
+                    hint: "token expired — login-copilot (L)".into(),
+                };
             }
             return Status::Err { msg: e };
         }
     };
-    let plan = d.get("copilot_plan")
+    let plan = d
+        .get("copilot_plan")
         .or_else(|| d.get("copilotPlan"))
         .and_then(|x| x.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let reset = d.get("quota_reset_date")
+    let reset = d
+        .get("quota_reset_date")
         .or_else(|| d.get("quota_reset_date_utc"))
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .chars()
         .take(10)
         .collect();
-    let login = d.get("login").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let login = d
+        .get("login")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let snap = d.get("quota_snapshots").or_else(|| d.get("quotaSnapshots"));
     let mut quotas = Vec::new();
     const FIELDS: [(&str, &str); 3] = [
@@ -207,9 +221,17 @@ pub fn collect(cfg: &Config) -> Status {
         ("completions", "completions"),
     ];
     for (key, label) in FIELDS {
-        let Some(q) = snap.and_then(|s| s.get(key)) else { continue };
-        let unlimited = q.get("unlimited").and_then(|x| x.as_bool()).unwrap_or(false);
-        let used_pct = q.get("percent_remaining").and_then(|x| x.as_f64()).map(|r| (100.0 - r).round() as u8);
+        let Some(q) = snap.and_then(|s| s.get(key)) else {
+            continue;
+        };
+        let unlimited = q
+            .get("unlimited")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let used_pct = q
+            .get("percent_remaining")
+            .and_then(|x| x.as_f64())
+            .map(|r| (100.0 - r).round() as u8);
         quotas.push(CopilotQuota {
             name: label.to_string(),
             used_pct: if unlimited { None } else { used_pct },
@@ -220,7 +242,14 @@ pub fn collect(cfg: &Config) -> Status {
         });
     }
     if quotas.is_empty() {
-        return Status::Err { msg: "no quota data in API response".into() };
+        return Status::Err {
+            msg: "no quota data in API response".into(),
+        };
     }
-    Status::Ok(CopilotStatus { plan, reset, login, quotas })
+    Status::Ok(CopilotStatus {
+        plan,
+        reset,
+        login,
+        quotas,
+    })
 }
