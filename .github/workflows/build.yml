@@ -1,7 +1,8 @@
 name: build
 
-# Reusable 6-target build (Linux / macOS / Windows × amd64 / arm64).
-# Called by `ci.yml` (main pushes → nightly) and `release.yml` (tags → release).
+# Reusable 5-target build (Linux amd64/arm64, macOS arm64, Windows amd64/arm64) —
+# all native runners, no QEMU or zig needed.
+# Called by `ci.yml` (master pushes → nightly) and `release.yml` (tags → release).
 on:
   workflow_call:
     inputs:
@@ -20,27 +21,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # native runners for 5 of 6 combos — no QEMU/container needed
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             name: linux-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            name: macos-amd64
           - os: macos-15
             target: aarch64-apple-darwin
             name: macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-amd64
-          # no public Windows-arm64 runner → cross-compile with cargo-zigbuild
-          - os: ubuntu-latest
+          - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             name: windows-arm64
-            zigbuild: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -52,21 +47,10 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: .
-      - if: matrix.zigbuild
-        uses: mlugg/setup-zig@v1
-      - if: matrix.zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
       - name: Build
         shell: bash
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --target "${{ matrix.target }}" --locked
-          else
-            cargo build --release --target "${{ matrix.target }}" --locked
-          fi
-      # macOS arm64 refuses to run unsigned binaries — ad-hoc signature
+        run: cargo build --release --target "${{ matrix.target }}" --locked
+      # macOS refuses to run unsigned binaries — ad-hoc signature
       - name: Ad-hoc codesign (macOS)
         if: runner.os == 'macOS'
         run: codesign --force -s - "target/${{ matrix.target }}/release/usage-bar"

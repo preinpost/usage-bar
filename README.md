@@ -123,17 +123,16 @@ cargo clippy --all-targets
 
 ## Release
 
-GitHub Actions builds and publishes 6 binaries (Linux / macOS / Windows ×
-amd64 / arm64) via a shared build workflow (`.github/workflows/build.yml`):
+GitHub Actions builds and publishes 5 binaries (Linux amd64/arm64, macOS
+arm64, Windows amd64/arm64) via a shared build workflow
+(`.github/workflows/build.yml`):
 
-- **Every push to main** (`.github/workflows/ci.yml`) rebuilds all 6 targets
-  and refreshes the rolling **nightly** release, so the latest main is always
-  downloadable; tests run on ubuntu as well
+- **Every push to master** (`.github/workflows/ci.yml`) rebuilds all 5 targets
+  and refreshes the rolling **nightly** release, so the latest master is
+  always downloadable; tests run on ubuntu as well
 - **Versioned releases** stay manual (`release.yml`):
 
-- 5 of 6 combos build on native GitHub-hosted runners (no QEMU), Windows
-  arm64 is cross-compiled with cargo-zigbuild (no public arm64 Windows runner
-  yet)
+- all 5 combos build on native GitHub-hosted runners — no QEMU, no zig
 - run it from the **Actions → bump & release → Run workflow**, optionally with
   an explicit version (default: auto patch/minor/major bump from Cargo.toml)
 - the workflow bumps the version (Cargo.toml + Cargo.lock), commits, tags
@@ -141,6 +140,6 @@ amd64 / arm64) via a shared build workflow (`.github/workflows/build.yml`):
   Release with auto-generated notes
 
 Note: the bump commit is pushed to the branch the workflow runs on, so that
-branch must not be protected against direct pushes. macOS arm64 binaries are
-ad-hoc signed (they run locally; for wide distribution sign with a real
+branch must not be protected against direct pushes. The macOS binary is
+ad-hoc signed (it runs locally; for wide distribution sign with a real
 Developer ID certificate instead).

@@ -1,12 +1,12 @@
 name: ci
 
-# Every push to main builds the 6 binaries and refreshes the rolling
-# `nightly` release, so the latest main is always downloadable.
+# Every push to master builds the 5 binaries and refreshes the rolling
+# `nightly` release, so the latest master is always downloadable.
 # Versioned releases stay manual: Actions → "bump & release".
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -56,6 +56,6 @@ jobs:
           git tag -f nightly HEAD
           git push origin nightly --force
           gh release create nightly dist/* \
-            --title "nightly (main @ $sha_short)" \
-            --notes "Auto-built from main@$sha_short. Versioned releases: Actions → **bump & release**." \
+            --title "nightly (master @ $sha_short)" \
+            --notes "Auto-built from master@$sha_short. Versioned releases: Actions → **bump & release**." \
             --latest=false
