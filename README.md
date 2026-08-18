@@ -149,14 +149,13 @@ cargo clippy --all-targets
 
 ## Release
 
-GitHub Actions builds and publishes 5 binaries (Linux amd64/arm64, macOS
+Versioned releases build and publish 5 binaries (Linux amd64/arm64, macOS
 arm64, Windows amd64/arm64) via a shared build workflow
 (`.github/workflows/build.yml`):
 
-- **Every push to master** (`.github/workflows/ci.yml`) rebuilds all 5 targets
-  and refreshes the rolling **nightly** release, so the latest master is
-  always downloadable; tests run on ubuntu as well
-- **Versioned releases** stay manual (`release.yml`):
+- **Every push to master** (`.github/workflows/ci.yml`) validates all 5 build
+  targets and runs the test suite only — nothing is published automatically
+- **Versioned releases** are manual (`release.yml`):
 
 - all 5 combos build on native GitHub-hosted runners — no QEMU, no zig
 - run it from the **Actions → bump & release → Run workflow**, optionally with

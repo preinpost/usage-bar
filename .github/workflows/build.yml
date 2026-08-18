@@ -2,7 +2,7 @@ name: build
 
 # Reusable 5-target build (Linux amd64/arm64, macOS arm64, Windows amd64/arm64) —
 # all native runners, no QEMU or zig needed.
-# Called by `ci.yml` (master pushes → nightly) and `release.yml` (tags → release).
+# Called by `ci.yml` (master pushes → CI validation) and `release.yml` (tags → release).
 on:
   workflow_call:
     inputs:

@@ -1,16 +1,13 @@
 name: ci
 
-# Every push to master builds the 5 binaries and refreshes the rolling
-# `nightly` release, so the latest master is always downloadable.
-# Versioned releases stay manual: Actions → "bump & release".
+# Every push to master validates all 5 build targets and runs the test suite.
+# Nothing is published here — versioned binaries ship via the manual
+# Actions → "bump & release" workflow.
 
 on:
   push:
     branches: [master]
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 concurrency:
   group: ci-main
@@ -32,30 +29,3 @@ jobs:
         with:
           workspaces: .
       - run: cargo test --locked
-
-  nightly:
-    name: Update nightly release
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Refresh rolling release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          sha_short=$(git rev-parse --short HEAD)
-          # replace the previous nightly release + its movable tag
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release delete nightly --yes --cleanup-tag || true
-          fi
-          git tag -f nightly HEAD
-          git push origin nightly --force
-          gh release create nightly dist/* \
-            --title "nightly (master @ $sha_short)" \
-            --notes "Auto-built from master@$sha_short. Versioned releases: Actions → **bump & release**." \
-            --latest=false
