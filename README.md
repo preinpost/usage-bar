@@ -69,6 +69,15 @@ ub logout opencode          # clear one provider only (copilot|openrouter|openco
 ub sync-openrouter          # refresh the per-model usage cache from the web dashboard
 ```
 
+`sync-openrouter` pulls your openrouter.ai login from **Chrome** to query the
+web dashboard's per-model analytics (the public API only exposes totals). On
+macOS it decrypts the Chrome cookies with the Keychain + AES-128-CBC; on
+Windows it unwraps the DPAPI key from `Local State` and decrypts the
+AES-256-GCM cookies. Requires an active openrouter.ai login in the default
+Chrome profile; Chrome 127+ App-Bound Encryption (`v20/v21`) cookies are not
+supported yet (the sync reports a clear error). Linux currently skips the
+dashboard sync.
+
 ### JSON output
 
 `status --json` emits a flat snapshot: `claude`, `codex`, `opencode`,

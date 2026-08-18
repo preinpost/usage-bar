@@ -1,27 +1,50 @@
 //! Internalized OpenRouter usage sync — replaces the former Python/shell
 //! scripts. Pulls the user's Chrome login, decrypts the openrouter.ai session
-//! cookies (macOS Keychain + AES-128-CBC), queries the web dashboard's
-//! `analytics-query` endpoint and writes the per-model usage cache.
+//! cookies, queries the web dashboard's `analytics-query` endpoint and writes
+//! the per-model usage cache.
+//!
+//! Platform support for the cookie pull:
+//! * macOS   — Keychain "Chrome Safe Storage" password → PBKDF2(saltysalt,
+//!   1003 iters) → AES-128-CBC ("v10" cookies).
+//! * Windows — `Local State` `os_crypt.encrypted_key` → DPAPI
+//!   (CryptUnprotectData) → AES-256-GCM ("v10" cookies).
+//! * Linux/other — not supported (no Secret Service / kwallet integration);
+//!   the sync reports a clear error instead of guessing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
 use aes::Aes128;
+#[cfg(target_os = "macos")]
 use cbc::Decryptor;
+#[cfg(target_os = "macos")]
 use cipher::block_padding::Pkcs7;
+#[cfg(target_os = "macos")]
 use cipher::{BlockDecryptMut, KeyIvInit};
+#[cfg(target_os = "macos")]
 use hmac::Hmac;
+#[cfg(target_os = "macos")]
 use pbkdf2::pbkdf2;
+#[cfg(target_os = "macos")]
+use sha1::Sha1;
+
+#[cfg(target_os = "windows")]
+use aes_gcm::aead::Aead;
+#[cfg(target_os = "windows")]
+use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
+
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use sha1::Sha1;
 
 use crate::config::Config;
 use crate::http;
 
 use chrono::TimeZone as _;
 
+#[cfg(target_os = "macos")]
 type HmacSha1 = Hmac<Sha1>;
+#[cfg(target_os = "macos")]
 type Aes128CbcDec = Decryptor<Aes128>;
 
 const ANALYTICS_URL: &str = "https://openrouter.ai/api/frontend/v1/private/analytics-query";
@@ -33,6 +56,9 @@ fn home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+// ---------------------------------------------------------------- locations
+
+#[cfg(target_os = "macos")]
 fn chrome_cookie_db() -> PathBuf {
     home()
         .join("Library")
@@ -43,9 +69,46 @@ fn chrome_cookie_db() -> PathBuf {
         .join("Cookies")
 }
 
-/// 16-byte AES key: PBKDF2-HMAC-SHA1 of the Keychain "Chrome Safe Storage"
-/// password (salt `saltysalt`, 1003 rounds).
-fn chrome_key() -> Result<[u8; 16], String> {
+#[cfg(target_os = "windows")]
+fn local_app_data() -> PathBuf {
+    std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join("AppData").join("Local"))
+}
+
+#[cfg(target_os = "windows")]
+fn chrome_cookie_db() -> PathBuf {
+    // Chrome moved the cookie store into `Network\` (Chrome 104+); older
+    // installs keep it in `Default\`. Prefer the current location.
+    let ud = local_app_data().join("Google").join("Chrome").join("User Data");
+    let net = ud.join("Default").join("Network").join("Cookies");
+    if net.exists() {
+        net
+    } else {
+        ud.join("Default").join("Cookies")
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn chrome_local_state() -> PathBuf {
+    local_app_data()
+        .join("Google")
+        .join("Chrome")
+        .join("User Data")
+        .join("Local State")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn chrome_cookie_db() -> PathBuf {
+    PathBuf::new()
+}
+
+// ------------------------------------------------------------- key material
+
+/// 16-byte AES key (macOS): PBKDF2-HMAC-SHA1 of the Keychain "Chrome Safe
+/// Storage" password (salt `saltysalt`, 1003 rounds).
+#[cfg(target_os = "macos")]
+fn chrome_key() -> Result<Vec<u8>, String> {
     let out = std::process::Command::new("security")
         .args([
             "-q",
@@ -65,28 +128,211 @@ fn chrome_key() -> Result<[u8; 16], String> {
     let mut key = [0u8; 16];
     pbkdf2::<HmacSha1>(password.as_bytes(), b"saltysalt", 1003, &mut key)
         .map_err(|e| format!("key derivation failed: {e}"))?;
+    Ok(key.to_vec())
+}
+
+/// 32-byte AES key (Windows): the `os_crypt.encrypted_key` from `Local State`
+/// is a base64 blob prefixed with `DPAPI`; unwrap it with CryptUnprotectData.
+#[cfg(target_os = "windows")]
+fn chrome_key() -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+
+    let text = std::fs::read_to_string(chrome_local_state())
+        .map_err(|e| format!("read chrome Local State: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse chrome Local State: {e}"))?;
+    let b64 = v
+        .get("os_crypt")
+        .and_then(|o| o.get("encrypted_key"))
+        .and_then(|x| x.as_str())
+        .ok_or("os_crypt.encrypted_key not found in chrome Local State")?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("decode os_crypt.encrypted_key: {e}"))?;
+    let blob = raw
+        .strip_prefix(b"DPAPI")
+        .ok_or("os_crypt.encrypted_key: missing DPAPI prefix")?;
+    let key = dpapi_unprotect(blob)?;
+    if key.len() != 32 {
+        return Err(format!("DPAPI unwrap returned {} bytes, expected 32", key.len()));
+    }
     Ok(key)
 }
 
-/// Decrypt a macOS Chrome cookie: `v10` prefix, AES-128-CBC with the fixed
-/// 16-space IV, PKCS#7 unpad, then drop the 32-byte domain-integrity prefix
-/// newer Chrome builds prepend to the plaintext.
-fn decrypt_cookie(enc: &[u8], key: &[u8; 16]) -> Result<String, String> {
-    if enc.len() < 3 || &enc[..3] != b"v10" {
-        return Err("unsupported cookie scheme".into());
+#[cfg(target_os = "windows")]
+fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree};
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+
+    let mut in_blob = CRYPT_INTEGER_BLOB {
+        cbData: blob.len() as u32,
+        pbData: blob.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    // SAFETY: valid input blob (borrowed for the call), no entropy/reserved
+    // args, output blob owned by the OS until we LocalFree it.
+    let ok = unsafe {
+        CryptUnprotectData(
+            &mut in_blob as *const _,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut out_blob,
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(format!("CryptUnprotectData failed (win32 error 0x{err:08X})"));
     }
-    let iv = [0x20u8; 16]; // b' ' * 16
-    let mut buf = enc[3..].to_vec();
-    let pt = Aes128CbcDec::new(key.into(), &iv.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|_| "aes-128-cbc decrypt failed".to_string())?;
-    let value = if pt.len() > 32 { &pt[32..] } else { pt };
+    let data = if out_blob.cbData > 0 && !out_blob.pbData.is_null() {
+        // SAFETY: out_blob is owned by the OS for the lifetime of this scope;
+        // we copy before LocalFree.
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }.to_vec()
+    } else {
+        Vec::new()
+    };
+    if !out_blob.pbData.is_null() {
+        // SAFETY: pointer came from CryptUnprotectData (LocalAlloc).
+        unsafe { LocalFree(out_blob.pbData as _) };
+    }
+    Ok(data)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn chrome_key() -> Result<Vec<u8>, String> {
+    Err("OpenRouter dashboard sync is only supported on macOS and Windows".into())
+}
+
+// ----------------------------------------------------------- cookie decrypt
+
+/// `v10`-scheme cookie decrypt. `key` is 16 bytes (macOS, AES-128-CBC) or
+/// 32 bytes (Windows, AES-256-GCM); `strip_prefix` drops the 32-byte
+/// SHA-256-of-domain integrity prefix that Chromium prepends since cookie
+/// database version 24.
+fn decrypt_cookie(enc: &[u8], key: &[u8], strip_prefix: bool) -> Result<String, String> {
+    if enc.len() < 3 || &enc[..3] != b"v10" {
+        return match &enc[..enc.len().min(3)] {
+            b"v20" | b"v21" => Err(
+                "cookie uses Chrome App-Bound Encryption (v20/v21) — not supported".into(),
+            ),
+            _ => Err("unsupported cookie scheme".into()),
+        };
+    }
+    let plain = decrypt_body(&enc[3..], key)?;
+    let value = if strip_prefix && plain.len() > 32 {
+        &plain[32..]
+    } else {
+        &plain[..]
+    };
     let s = String::from_utf8_lossy(value).to_string();
     if s.is_empty() {
         Err("empty cookie value".into())
     } else {
         Ok(s)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn decrypt_body(body: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    let iv = [0x20u8; 16]; // b' ' * 16
+    let mut buf = body.to_vec();
+    let pt = Aes128CbcDec::new(key[..16].into(), &iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|_| "aes-128-cbc decrypt failed".to_string())?;
+    Ok(pt.to_vec())
+}
+
+#[cfg(target_os = "windows")]
+fn decrypt_body(body: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    // v10 layout after the prefix: nonce(12) + ciphertext + tag(16)
+    if body.len() < 12 + 16 {
+        return Err("cookie payload too short for aes-256-gcm".into());
+    }
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|_| "bad aes-256-gcm key".to_string())?;
+    let nonce = Nonce::from_slice(&body[..12]);
+    cipher
+        .decrypt(nonce, &body[12..])
+        .map_err(|_| "aes-256-gcm decrypt failed".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn decrypt_body(_body: &[u8], _key: &[u8]) -> Result<Vec<u8>, String> {
+    Err("unsupported platform".into())
+}
+
+// ----------------------------------------------------------- database open
+
+/// Owns the read-only cookie connection plus (on Windows) the temp copy of
+/// the Chrome DB, which is cleaned up when dropped.
+struct CookieDb {
+    conn: Connection,
+    tmp: Option<PathBuf>,
+}
+
+impl CookieDb {
+    fn conn(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl Drop for CookieDb {
+    fn drop(&mut self) {
+        if let Some(p) = &self.tmp {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_cookie_db(db: &Path) -> Result<CookieDb, String> {
+    let uri = format!("file:{}?mode=ro", db.display());
+    let conn = Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("open cookies db: {e}"))?;
+    Ok(CookieDb { conn, tmp: None })
+}
+
+#[cfg(target_os = "windows")]
+fn open_cookie_db(db: &Path) -> Result<CookieDb, String> {
+    // Chrome keeps the cookie store open (WAL, locked) — copy the file to a
+    // private temp location and open that instead. The copy is left behind by
+    // Chrome's own checkpointing: cookies we need change rarely, so a
+    // slightly stale snapshot is fine.
+    let tmp = std::env::temp_dir().join(format!("usage-bar-cookies-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let copy = tmp.join("Cookies");
+    std::fs::copy(db, &copy).map_err(|e| format!("copy cookies db: {e}"))?;
+    let conn = Connection::open(&copy).map_err(|e| format!("open cookies copy: {e}"))?;
+    Ok(CookieDb {
+        conn,
+        tmp: Some(tmp),
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_cookie_db(_db: &Path) -> Result<CookieDb, String> {
+    Err("unsupported platform".into())
+}
+
+/// Chromium cookie-DB schema version 24+ prepends a 32-byte SHA-256 of the
+/// domain to the plaintext; read the stored version instead of guessing.
+fn cookie_db_has_prefix(conn: &Connection) -> bool {
+    conn.prepare("SELECT value FROM meta WHERE key = 'version'")
+        .ok()
+        .and_then(|mut stmt| stmt.query_row([], |r| r.get::<_, String>(0)).ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|v| v >= 24)
+        .unwrap_or(true) // modern Chrome by default
 }
 
 struct OrCookie {
@@ -96,19 +342,20 @@ struct OrCookie {
 
 /// Read + decrypt every openrouter.ai cookie from the user's Chrome profile.
 fn chrome_openrouter_cookies() -> Result<Vec<OrCookie>, String> {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        return Err("OpenRouter dashboard sync is only supported on macOS and Windows".into());
+    }
     let db = chrome_cookie_db();
     if !db.exists() {
         return Err(format!("chrome cookie db not found: {}", db.display()));
     }
-    let uri = format!("file:{}?mode=ro", db.display());
-    let conn = Connection::open_with_flags(
-        &uri,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|e| format!("open cookies db: {e}"))?;
+    let db = open_cookie_db(&db)?;
+    let strip_prefix = cookie_db_has_prefix(db.conn());
     let key = chrome_key()?;
 
-    let mut stmt = conn
+    let mut stmt = db
+        .conn()
         .prepare("SELECT name, encrypted_value FROM cookies WHERE host_key LIKE ?1")
         .map_err(|e| format!("query cookies: {e}"))?;
     let rows = stmt
@@ -123,7 +370,7 @@ fn chrome_openrouter_cookies() -> Result<Vec<OrCookie>, String> {
         if name.starts_with("_ga") || name.starts_with("_dd_s") || name.starts_with("or_statsig") {
             continue;
         }
-        if let Ok(value) = decrypt_cookie(&enc, &key) {
+        if let Ok(value) = decrypt_cookie(&enc, &key, strip_prefix) {
             out.push(OrCookie { name, value });
         }
     }
@@ -182,7 +429,7 @@ fn parse_usage(resp: &Value) -> Value {
     let mut total = 0.0f64;
     let models: Vec<Value> = data
         .iter()
-        .filter_map(|r| {
+        .map(|r| {
             let raw = r.get("model").and_then(|x| x.as_str()).unwrap_or("?");
             let cost = r.get("total_usage").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let tokens = r
@@ -192,12 +439,12 @@ fn parse_usage(resp: &Value) -> Value {
                 .unwrap_or(0);
             let label = labels.get(raw).and_then(|x| x.as_str()).unwrap_or(raw);
             total += cost;
-            Some(json!({
+            json!({
                 "model": raw,
                 "label": label,
                 "cost": (cost * 10000.0).round() / 10000.0,
                 "tokens": tokens,
-            }))
+            })
         })
         .collect();
     json!({ "total": (total * 10000.0).round() / 10000.0, "models": models })
