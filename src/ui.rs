@@ -85,6 +85,13 @@ struct ConnectMenu {
 enum Modal {
     Menu(ConnectMenu),
     Login(LoginState),
+    /// `?` settings: assign fold digits (1..0) to sections
+    Settings(SettingsState),
+}
+
+/// Which section row the settings page has highlighted.
+struct SettingsState {
+    selected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,7 +129,8 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
     let refresh = Duration::from_secs(cfg.refresh_seconds.max(5));
     let mut snap = snapshot::snapshot(&cfg);
     let mut folded = CollapseState::load();
-    let mut body = build_body(&cfg, &snap, folded, 120);
+    let mut keymap = Keymap::load();
+    let mut body = build_body(&cfg, &snap, folded, keymap, 120);
     let mut scroll = 0usize;
     let mut body_rect = Rect::default();
     let mut snap_at = Instant::now();
@@ -168,13 +176,13 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                 flash: flash.clone(),
             };
             let w = f.area().width.max(8) as usize;
-            let fresh = build_body(&cfg, &snap, folded, w);
+            let fresh = build_body(&cfg, &snap, folded, keymap, w);
             let (b, foot) = draw_dashboard(f, rect, &info, &fresh, &mut scroll);
             body_rect = b;
             footer_rect = foot;
             body = fresh;
             modal_rect = match &mut modal {
-                Some(m) => draw_modal(f, rect, m),
+                Some(m) => draw_modal(f, rect, m, &keymap),
                 None => None,
             };
         })?;
@@ -224,6 +232,7 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                         &snap,
                         &mut scroll,
                         &mut folded,
+                        &mut keymap,
                     )?;
                     if quit {
                         break Ok(());
@@ -253,6 +262,7 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                                         &cfg,
                                         &snap,
                                         folded,
+                                        keymap,
                                         body_rect.width.max(8) as usize,
                                     );
                                     scroll = 0;
@@ -339,6 +349,7 @@ fn handle_key(
     snap: &Snapshot,
     scroll: &mut usize,
     folded: &mut CollapseState,
+    keymap: &mut Keymap,
 ) -> std::io::Result<bool> {
     let ctrl_c = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c');
     if ctrl_c {
@@ -403,6 +414,30 @@ fn handle_key(
                     }
                 }
             }
+            Modal::Settings(st) => {
+                let n = Section::ALL.len();
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') if n > 0 => {
+                        st.selected = (st.selected + n - 1) % n;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if n > 0 => {
+                        st.selected = (st.selected + 1) % n;
+                    }
+                    // bind the pressed digit to the highlighted section
+                    KeyCode::Char(c) if digit_idx(c).is_some() => {
+                        let s = Section::ALL[st.selected];
+                        keymap.assign(c, s);
+                        keymap.save();
+                    }
+                    // unbound: the section stays foldable by click only
+                    KeyCode::Char('x') | KeyCode::Char('X') => {
+                        keymap.clear(Section::ALL[st.selected]);
+                        keymap.save();
+                    }
+                    KeyCode::Char('q') | KeyCode::Esc => *modal = None,
+                    _ => {}
+                }
+            }
         }
         return Ok(false); // swallow keys while a modal is open
     }
@@ -422,13 +457,14 @@ fn handle_key(
         KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
         KeyCode::PageDown => *scroll = scroll.saturating_add(10),
         KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
-        // fold/unfold sections by their left-key (1..7)
-        KeyCode::Char(c) if ('1'..='7').contains(&c) => {
-            if let Some(s) = Section::from_key(c) {
+        // fold/unfold sections by their bound digit (1..0, see ? settings)
+        KeyCode::Char(c) if digit_idx(c).is_some() => {
+            if let Some(s) = keymap.section_for_digit(c) {
                 folded.toggle(s);
                 folded.save();
             }
         }
+        KeyCode::Char('?') => *modal = Some(Modal::Settings(SettingsState { selected: 0 })),
         _ => {}
     }
     Ok(false)
@@ -702,7 +738,7 @@ fn draw_dashboard(
         ),
         Span::raw(" ".repeat(chunks[0].width.saturating_sub(8 + 28) as usize)),
         Span::styled(
-            " 1-7 fold · j/k/wheel scroll",
+            " 1-0 fold · ? settings · j/k/wheel scroll",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -938,10 +974,11 @@ fn rect_centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn draw_modal(f: &mut Frame, area: Rect, modal: &mut Modal) -> Option<Rect> {
+fn draw_modal(f: &mut Frame, area: Rect, modal: &mut Modal, keymap: &Keymap) -> Option<Rect> {
     match modal {
         Modal::Menu(menu) => draw_connect_menu(f, area, menu),
         Modal::Login(ls) => draw_login_modal(f, area, ls),
+        Modal::Settings(st) => draw_settings_modal(f, area, st, keymap),
     }
 }
 
@@ -1022,6 +1059,79 @@ fn draw_connect_menu(f: &mut Frame, area: Rect, menu: &mut ConnectMenu) -> Optio
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Connect — pick a provider ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().fg(Color::White)),
+        rect,
+    );
+    Some(rect)
+}
+
+/// `?` page: bind fold digits (1..0) to sections. Highlight a row with
+/// ↑/↓, press a digit to bind it, `x` to unbind. Free keys are listed dimmed.
+fn draw_settings_modal(f: &mut Frame, area: Rect, st: &SettingsState, km: &Keymap) -> Option<Rect> {
+    let n = Section::ALL.len();
+    // title + blank + rows + blank + hint + borders(2)
+    let rect = rect_centered(area, 52, n as u16 + 6);
+    f.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::raw(" Fold digit — press 1..0 to bind, x to clear"));
+    lines.push(Line::raw(""));
+    for (i, s) in Section::ALL.iter().enumerate() {
+        let sel = i == st.selected;
+        let key = km.key_of(*s);
+        let mark = if sel { "▸ " } else { "  " };
+        let keytxt = key
+            .map(|c| format!("[{c}]"))
+            .unwrap_or_else(|| "[·]".into());
+        let keycolor = if key.is_some() {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{mark}{:<14}", s.name()),
+                Style::default()
+                    .fg(if sel { Color::Yellow } else { Color::White })
+                    .add_modifier(if sel {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Span::styled(
+                keytxt,
+                Style::default().fg(keycolor).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    // free keys summary
+    let free: Vec<String> = (0..10)
+        .filter(|i| km.slots[*i].is_none())
+        .map(|i| digit_char(i).to_string())
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![Span::styled(
+        if free.is_empty() {
+            " all 10 digits bound".to_string()
+        } else {
+            format!(" free: {}", free.join(" "))
+        },
+        Style::default().fg(Color::DarkGray),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        " ↑/↓ move · 1-0 assign · x clear · q/Esc close",
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Settings — fold keys ")
                     .border_style(Style::default().fg(Color::Cyan)),
             )
             .style(Style::default().fg(Color::White)),
@@ -1154,12 +1264,6 @@ impl Section {
             Section::OpenRouter => 6,
         }
     }
-    fn key(self) -> char {
-        (b'1' + self.idx() as u8) as char
-    }
-    fn from_key(c: char) -> Option<Section> {
-        Section::ALL.into_iter().find(|s| s.key() == c)
-    }
     fn name(self) -> &'static str {
         match self {
             Section::Claude => "Claude Code",
@@ -1173,6 +1277,114 @@ impl Section {
     }
     fn from_name(n: &str) -> Option<Section> {
         Section::ALL.into_iter().find(|s| s.name() == n)
+    }
+}
+
+/// Which digit key (1..0) folds which section. `slots[i]` = section bound to
+/// key `digit_char(i)` ('1'…'9','0'). Default: sections in registration order
+/// (Claude Code first), so 1-7 = Claude…OpenRouter and 8/9/0 stay free.
+/// Persisted to `keymap.json`; editable from the `?` settings page.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Keymap {
+    slots: [Option<Section>; 10],
+}
+
+fn digit_char(i: usize) -> char {
+    if i == 9 {
+        '0'
+    } else {
+        (b'1' + i as u8) as char
+    }
+}
+
+fn digit_idx(c: char) -> Option<usize> {
+    match c {
+        '1'..='9' => Some((c as u8 - b'1') as usize),
+        '0' => Some(9),
+        _ => None,
+    }
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        let mut slots = [None; 10];
+        for (i, s) in Section::ALL.into_iter().enumerate() {
+            slots[i] = Some(s);
+        }
+        Keymap { slots }
+    }
+}
+
+impl Keymap {
+    /// the digit bound to a section, if any
+    fn key_of(&self, s: Section) -> Option<char> {
+        self.slots
+            .iter()
+            .position(|x| *x == Some(s))
+            .map(digit_char)
+    }
+    /// section folded by a digit key, if bound
+    fn section_for_digit(&self, d: char) -> Option<Section> {
+        digit_idx(d).and_then(|i| self.slots[i])
+    }
+    /// bind a digit to a section, releasing the digit's previous owner and
+    /// the section's previous key
+    fn assign(&mut self, d: char, s: Section) {
+        let Some(idx) = digit_idx(d) else { return };
+        for slot in self.slots.iter_mut() {
+            if *slot == Some(s) {
+                *slot = None;
+            }
+        }
+        self.slots[idx] = Some(s);
+    }
+    fn clear(&mut self, s: Section) {
+        for slot in self.slots.iter_mut() {
+            if *slot == Some(s) {
+                *slot = None;
+            }
+        }
+    }
+    fn load() -> Self {
+        let mut km = Keymap::default();
+        let p = crate::config::keymap_path();
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            return km;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return km;
+        };
+        if let Some(obj) = v.as_object() {
+            for (k, val) in obj {
+                let Some(i) = k.chars().next().and_then(digit_idx) else {
+                    continue;
+                };
+                if let Some(name) = val.as_str() {
+                    if let Some(s) = Section::from_name(name) {
+                        // release s from its current slot first (order matters
+                        // when a section moved keys)
+                        for slot in km.slots.iter_mut() {
+                            if *slot == Some(s) {
+                                *slot = None;
+                            }
+                        }
+                        km.slots[i] = Some(s);
+                    }
+                }
+            }
+        }
+        km
+    }
+    fn save(&self) {
+        let mut obj = serde_json::Map::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(s) = slot {
+                obj.insert(digit_char(i).to_string(), serde_json::json!(s.name()));
+            }
+        }
+        if let Ok(text) = serde_json::to_string(&serde_json::Value::Object(obj)) {
+            let _ = std::fs::write(crate::config::keymap_path(), text);
+        }
     }
 }
 
@@ -1343,9 +1555,18 @@ fn overlay_corner(f: &mut Frame, area: Rect, text: &str, top: bool) {
 /// Section title row: `1▾ Claude Code  <stats>  <tail>`. Folded sections keep
 /// only this row, dimmed, with a `▸` marker — click the left marker or press
 /// the digit to unfold.
-fn section_line(s: Section, open: bool, body: &str, tail: &str, width: usize) -> Line<'static> {
+fn section_line(
+    s: Section,
+    key: Option<char>,
+    open: bool,
+    body: &str,
+    tail: &str,
+    width: usize,
+) -> Line<'static> {
     let mark = if open { "▾" } else { "▸" };
-    let name = format!("{}{} {}", s.key(), mark, s.name());
+    // unbound sections get a dot marker — foldable by click, no digit
+    let k = key.unwrap_or('·');
+    let name = format!("{k}{mark} {}", s.name());
     let line = title_line(&name, body, tail, width);
     if open {
         line
@@ -1362,7 +1583,13 @@ fn section_line(s: Section, open: bool, body: &str, tail: &str, width: usize) ->
 /// Lay out the dashboard body (which lines to show, in what order).
 /// Detail rows are skipped for folded sections. `width` selects the compact
 /// (narrow-pane) formatting that drops bars and detail rows.
-fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize) -> BodyLines {
+fn build_body(
+    cfg: &Config,
+    snap: &Snapshot,
+    folded: CollapseState,
+    keymap: Keymap,
+    width: usize,
+) -> BodyLines {
     let compact = width < 56;
     let mut body = BodyLines::new();
 
@@ -1370,12 +1597,19 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
     // Set `show_no_data_providers: true` in config.json to opt back into the
     // always-show-everything layout.
     let show_all = cfg.show_no_data_providers;
-    let c_active = snap.claude.msgs > 0 || snap.claude.has_token_data;
-    let x_active = snap.codex.sessions > 0 || snap.codex.turns > 0 || snap.codex.has_token_data;
+    // local tools (filesystem data) show whenever they have ever been used,
+    // with a placeholder when the current window is empty
+    let c_active = snap.claude.last_activity_secs.is_some()
+        || snap.claude.msgs > 0
+        || snap.claude.has_token_data;
+    let x_active = snap.codex.last_activity_secs.is_some()
+        || snap.codex.sessions > 0
+        || snap.codex.turns > 0
+        || snap.codex.has_token_data;
     let o_active = snap
         .opencode
         .as_ref()
-        .map(|o| o.sessions > 0 || o.has_token_data)
+        .map(|o| o.last_activity_secs.is_some() || o.sessions > 0 || o.has_token_data)
         .unwrap_or(false);
     let cp_active = matches!(&snap.copilot, Status::Ok(_));
     let g_active = !snap.grok.needs_login || snap.grok.local_sessions > 0;
@@ -1405,25 +1639,43 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
             body.divider(width);
         }
         let c = &snap.claude;
-        let mut stats = format!(
-            "in {} · out {} · cache {}",
-            fmt_tok(c.tokens.input),
-            fmt_tok(c.tokens.output),
-            fmt_tok(c.tokens.cache_read + c.tokens.cache_write),
-        );
-        if c.msgs > 0 {
-            stats.push_str(&format!(
-                " · {} msg{}",
-                c.msgs,
-                if c.msgs == 1 { "" } else { "s" }
-            ));
-        }
+        let has_win = c.tokens.total() > 0 || c.msgs > 0;
+        let stats = if has_win {
+            let mut s = format!(
+                "in {} · out {} · cache {}",
+                fmt_tok(c.tokens.input),
+                fmt_tok(c.tokens.output),
+                fmt_tok(c.tokens.cache_read + c.tokens.cache_write),
+            );
+            if c.msgs > 0 {
+                s.push_str(&format!(
+                    " · {} msg{}",
+                    c.msgs,
+                    if c.msgs == 1 { "" } else { "s" }
+                ));
+            }
+            s
+        } else if let Some(last) = c.last_activity_secs {
+            format!(
+                "no usage today · last {}",
+                crate::model::fmt_last_activity(Some(last))
+            )
+        } else {
+            "no data yet".into()
+        };
         let open = !folded.collapsed(Section::Claude);
         body.push_section(
             Section::Claude,
-            section_line(Section::Claude, open, &stats, &fmt_money(c.cost), width),
+            section_line(
+                Section::Claude,
+                keymap.key_of(Section::Claude),
+                open,
+                &stats,
+                &fmt_money(c.cost),
+                width,
+            ),
         );
-        if open {
+        if open && has_win {
             if compact {
                 body.push(compact_budget_line(
                     "budget",
@@ -1453,6 +1705,7 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
             body.divider(width);
         }
         let x = &snap.codex;
+        let has_win = x.sessions > 0 || x.turns > 0 || x.has_token_data;
         let token_s = if x.has_token_data {
             format!(
                 "in {} · out {} · cache {}",
@@ -1460,16 +1713,30 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
                 fmt_tok(x.tokens.output),
                 fmt_tok(x.tokens.cache_read + x.tokens.cache_write),
             )
-        } else {
+        } else if x.sessions > 0 || x.turns > 0 {
             format!(
                 "{} sessions · {} turns (no token data)",
                 x.sessions, x.turns
             )
+        } else if let Some(last) = x.last_activity_secs {
+            format!(
+                "no usage today · last {}",
+                crate::model::fmt_last_activity(Some(last))
+            )
+        } else {
+            "no data yet".into()
         };
         let open = !folded.collapsed(Section::Codex);
         body.push_section(
             Section::Codex,
-            section_line(Section::Codex, open, &token_s, &fmt_money(x.cost), width),
+            section_line(
+                Section::Codex,
+                keymap.key_of(Section::Codex),
+                open,
+                &token_s,
+                &fmt_money(x.cost),
+                width,
+            ),
         );
     }
 
@@ -1479,25 +1746,43 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
             if !compact {
                 body.divider(width);
             }
-            let mut stats = format!(
-                "in {} · out {} · cache {}",
-                fmt_tok(o.tokens.input),
-                fmt_tok(o.tokens.output),
-                fmt_tok(o.tokens.cache_read + o.tokens.cache_write),
-            );
-            if o.sessions > 0 {
-                stats.push_str(&format!(
-                    " · {} session{}",
-                    o.sessions,
-                    if o.sessions == 1 { "" } else { "s" }
-                ));
-            }
+            let has_win = o.sessions > 0 || o.tokens.total() > 0;
+            let stats = if has_win {
+                let mut s = format!(
+                    "in {} · out {} · cache {}",
+                    fmt_tok(o.tokens.input),
+                    fmt_tok(o.tokens.output),
+                    fmt_tok(o.tokens.cache_read + o.tokens.cache_write),
+                );
+                if o.sessions > 0 {
+                    s.push_str(&format!(
+                        " · {} session{}",
+                        o.sessions,
+                        if o.sessions == 1 { "" } else { "s" }
+                    ));
+                }
+                s
+            } else if let Some(last) = o.last_activity_secs {
+                format!(
+                    "no usage today · last {}",
+                    crate::model::fmt_last_activity(Some(last))
+                )
+            } else {
+                "no data yet".into()
+            };
             let open = !folded.collapsed(Section::OpenCode);
             body.push_section(
                 Section::OpenCode,
-                section_line(Section::OpenCode, open, &stats, &fmt_money(o.cost), width),
+                section_line(
+                    Section::OpenCode,
+                    keymap.key_of(Section::OpenCode),
+                    open,
+                    &stats,
+                    &fmt_money(o.cost),
+                    width,
+                ),
             );
-            if open {
+            if open && has_win {
                 if compact {
                     body.push(compact_budget_line(
                         "budget",
@@ -1548,7 +1833,14 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
             let open = !folded.collapsed(Section::OpenCodeGo);
             body.push_section(
                 Section::OpenCodeGo,
-                section_line(Section::OpenCodeGo, open, "official quota", &tail, width),
+                section_line(
+                    Section::OpenCodeGo,
+                    keymap.key_of(Section::OpenCodeGo),
+                    open,
+                    "official quota",
+                    &tail,
+                    width,
+                ),
             );
             if open {
                 for (label, w) in [
@@ -1591,7 +1883,14 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
                 let open = !folded.collapsed(Section::Copilot);
                 body.push_section(
                     Section::Copilot,
-                    section_line(Section::Copilot, open, "", &meta, width),
+                    section_line(
+                        Section::Copilot,
+                        keymap.key_of(Section::Copilot),
+                        open,
+                        "",
+                        &meta,
+                        width,
+                    ),
                 );
                 if open {
                     // only the quotas that actually run out (AI credits on
@@ -1645,6 +1944,7 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
             let open = !folded.collapsed(Section::Grok);
             Some(section_line(
                 Section::Grok,
+                keymap.key_of(Section::Grok),
                 open,
                 &format!("credits {p:.0}% used · resets {resets}"),
                 "",
@@ -1686,6 +1986,7 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
                 Section::OpenRouter,
                 section_line(
                     Section::OpenRouter,
+                    keymap.key_of(Section::OpenRouter),
                     open,
                     &format!("credits {bal}"),
                     &tail,
@@ -2046,6 +2347,7 @@ mod tests {
             &snap,
             &mut 0usize,
             &mut CollapseState::default(),
+            &mut Keymap::default(),
         )
         .unwrap();
         let Modal::Menu(menu) = modal.as_ref().unwrap() else {
@@ -2062,6 +2364,7 @@ mod tests {
             &snap,
             &mut 0usize,
             &mut CollapseState::default(),
+            &mut Keymap::default(),
         )
         .unwrap();
         let Modal::Menu(menu) = modal.as_ref().unwrap() else {
@@ -2078,6 +2381,7 @@ mod tests {
             &snap,
             &mut 0usize,
             &mut CollapseState::default(),
+            &mut Keymap::default(),
         )
         .unwrap();
         assert!(modal.is_none());
@@ -2101,6 +2405,7 @@ mod tests {
                 &snap,
                 &mut 0usize,
                 &mut CollapseState::default(),
+                &mut Keymap::default(),
             )
             .unwrap();
         }
@@ -2163,7 +2468,13 @@ mod tests {
         let cfg = crate::config::load();
 
         // open: title + budget + item rows, all mapped to the Claude section
-        let open = build_body(&cfg, &snap, CollapseState::default(), 120);
+        let open = build_body(
+            &cfg,
+            &snap,
+            CollapseState::default(),
+            Keymap::default(),
+            120,
+        );
         assert_eq!(open.lines.len(), 3);
         assert_eq!(open.section_at(0), Some(Section::Claude));
         assert_eq!(open.section_at(2), Some(Section::Claude));
@@ -2172,7 +2483,7 @@ mod tests {
         let mut folded = CollapseState::default();
         folded.toggle(Section::Claude);
         assert!(folded.collapsed(Section::Claude));
-        let closed = build_body(&cfg, &snap, folded, 120);
+        let closed = build_body(&cfg, &snap, folded, Keymap::default(), 120);
         assert_eq!(closed.lines.len(), 1);
         assert_eq!(closed.section_at(0), Some(Section::Claude));
     }
@@ -2185,7 +2496,13 @@ mod tests {
         snap.opencode_go.needs_key = true;
         snap.openrouter.needs_key = true;
         let cfg = crate::config::load();
-        let body = build_body(&cfg, &snap, CollapseState::default(), 120);
+        let body = build_body(
+            &cfg,
+            &snap,
+            CollapseState::default(),
+            Keymap::default(),
+            120,
+        );
         assert_eq!(body.sections.len(), body.lines.len());
 
         // click the marker column on the second body row (Claude's budget row)
@@ -2216,6 +2533,7 @@ mod tests {
             &snap,
             &mut scroll,
             &mut folded,
+            &mut Keymap::default(),
         )
         .unwrap();
         assert!(folded.collapsed(Section::Codex));
@@ -2228,9 +2546,86 @@ mod tests {
             &snap,
             &mut scroll,
             &mut folded,
+            &mut Keymap::default(),
         )
         .unwrap();
         assert!(quit);
+    }
+
+    #[test]
+    fn keymap_defaults_to_registration_order() {
+        let km = Keymap::default();
+        // sections in registration order get 1..7; 8/9/0 stay free
+        assert_eq!(km.key_of(Section::Claude), Some('1'));
+        assert_eq!(km.key_of(Section::Codex), Some('2'));
+        assert_eq!(km.key_of(Section::OpenRouter), Some('7'));
+        assert_eq!(km.section_for_digit('1'), Some(Section::Claude));
+        assert_eq!(km.section_for_digit('8'), None);
+        assert_eq!(km.section_for_digit('0'), None);
+    }
+
+    #[test]
+    fn keymap_assign_swaps_without_duplicates() {
+        let mut km = Keymap::default();
+        // bind '3' to Claude: '3' frees OpenCode (its old owner), '1' frees
+        // Claude; every other binding is untouched
+        km.assign('3', Section::Claude);
+        assert_eq!(km.key_of(Section::Claude), Some('3'));
+        assert_eq!(km.key_of(Section::OpenCode), None);
+        assert_eq!(km.key_of(Section::Codex), Some('2'));
+        assert_eq!(km.key_of(Section::Grok), Some('6'));
+        // bind '0' to a section
+        km.assign('0', Section::OpenRouter);
+        assert_eq!(km.section_for_digit('0'), Some(Section::OpenRouter));
+        assert_eq!(km.key_of(Section::OpenRouter), Some('0'));
+        // clearing a section frees its digit
+        km.clear(Section::OpenRouter);
+        assert_eq!(km.section_for_digit('0'), None);
+    }
+
+    #[test]
+    fn settings_modal_binds_digits_via_keys() {
+        let cfg = crate::config::load();
+        let mut modal: Option<Modal> = None;
+        let mut next = Instant::now();
+        let mut scroll = 0usize;
+        let mut folded = CollapseState::default();
+        let mut km = Keymap::default();
+        let snap = Snapshot::default();
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+        let mut send = |c: char, modal: &mut Option<Modal>, km: &mut Keymap| {
+            handle_key(
+                key(c),
+                modal,
+                &mut next,
+                &cfg,
+                &snap,
+                &mut scroll,
+                &mut folded,
+                km,
+            )
+            .unwrap();
+        };
+
+        // '?' opens the settings page
+        send('?', &mut modal, &mut km);
+        assert!(matches!(modal, Some(Modal::Settings(_))));
+
+        // select row 6 (OpenRouter, last section) and bind '0' to it
+        for _ in 0..6 {
+            send('j', &mut modal, &mut km);
+        }
+        send('0', &mut modal, &mut km);
+        assert_eq!(km.key_of(Section::OpenRouter), Some('0'));
+        assert_eq!(km.key_of(Section::Grok), Some('6')); // untouched
+
+        // clear the highlighted section's key
+        send('x', &mut modal, &mut km);
+        assert_eq!(km.key_of(Section::OpenRouter), None);
+
+        // Esc closes the page
+        send('q', &mut modal, &mut km);
+        assert!(modal.is_none());
     }
 
     #[test]
@@ -2250,6 +2645,7 @@ mod tests {
             &snap,
             &mut scroll,
             &mut folded,
+            &mut Keymap::default(),
         )
         .unwrap();
         assert_eq!(scroll, 6);
@@ -2261,6 +2657,7 @@ mod tests {
             &snap,
             &mut scroll,
             &mut folded,
+            &mut Keymap::default(),
         )
         .unwrap();
         assert_eq!(scroll, 5);
@@ -2285,7 +2682,7 @@ mod tests {
             });
         }
         let cfg = crate::config::load();
-        let body = build_body(&cfg, &snap, CollapseState::default(), 80);
+        let body = build_body(&cfg, &snap, CollapseState::default(), Keymap::default(), 80);
         // many rows → content overflows a 3-row pane
 
         let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
@@ -2331,7 +2728,7 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
         let mut mrect = None;
         term.draw(|f| {
-            mrect = draw_modal(f, f.area(), &mut modal);
+            mrect = draw_modal(f, f.area(), &mut modal, &Keymap::default());
         })
         .unwrap();
         let mrect = mrect.unwrap();

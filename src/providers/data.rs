@@ -92,6 +92,8 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
     if !base.is_dir() {
         return out;
     }
+    // newest activity across everything (any project, any window)
+    let mut last: Option<i64> = None;
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -119,6 +121,15 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
         for jf in entries {
             if jf.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
+            }
+            if let Ok(md) = std::fs::metadata(&jf) {
+                if let Ok(mt) = md.modified() {
+                    let secs = mt
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    last = Some(last.map_or(secs, |l| l.max(secs)));
+                }
             }
             if !is_today_ish(&jf, start) {
                 continue;
@@ -162,6 +173,7 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
     out.items
         .sort_by(|a, b| b.tokens.total().cmp(&a.tokens.total()));
     out.has_token_data = out.tokens.total() > 0;
+    out.last_activity_secs = last;
     out
 }
 
@@ -169,8 +181,16 @@ pub fn collect_claude(start: DateTime<Local>, prices: &Prices) -> LocalStats {
 
 pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
     let mut out = LocalStats::default();
+    let mut last: Option<i64> = None;
     let history = config::codex_history_path();
     if history.exists() {
+        if let Ok(md) = std::fs::metadata(&history) {
+            if let Ok(mt) = md.modified() {
+                if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+                    last = Some(d.as_secs() as i64);
+                }
+            }
+        }
         if let Ok(f) = File::open(&history) {
             let reader = BufReader::new(f);
             for line in reader.lines().map_while(Result::ok) {
@@ -193,6 +213,14 @@ pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
             let p = entry.path();
             if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
+            }
+            if let Ok(md) = std::fs::metadata(p) {
+                if let Ok(mt) = md.modified() {
+                    if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+                        let secs = d.as_secs() as i64;
+                        last = Some(last.map_or(secs, |l| l.max(secs)));
+                    }
+                }
             }
             if !is_today_ish(p, start) {
                 continue;
@@ -253,6 +281,7 @@ pub fn collect_codex(start: DateTime<Local>) -> LocalStats {
         out.sessions = session_ids.len() as u64;
     }
     out.has_token_data = out.tokens.total() > 0;
+    out.last_activity_secs = last;
     out
 }
 
@@ -316,6 +345,15 @@ pub fn collect_opencode(start: DateTime<Local>) -> Option<LocalStats> {
             msgs: 0,
         };
         out.items.push(item);
+    }
+    if let Ok(mut s2) = conn.prepare("SELECT MAX(time_created) FROM session") {
+        if let Ok(mut rows) = s2.query([]) {
+            if let Ok(Some(r)) = rows.next() {
+                if let Ok(Some(t)) = r.get::<_, Option<i64>>(0) {
+                    out.last_activity_secs = Some(t / 1000);
+                }
+            }
+        }
     }
     out.items.sort_by(|a, b| {
         b.cost

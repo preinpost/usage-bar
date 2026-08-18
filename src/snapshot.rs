@@ -36,12 +36,16 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     // Only show providers that are actually connected / have data, so the
     // one-shot summary matches the panel (unless show_no_data_providers).
     let show_all = cfg.show_no_data_providers;
-    let c_active = s.claude.msgs > 0 || s.claude.has_token_data;
-    let x_active = s.codex.sessions > 0 || s.codex.turns > 0 || s.codex.has_token_data;
+    let c_active =
+        s.claude.last_activity_secs.is_some() || s.claude.msgs > 0 || s.claude.has_token_data;
+    let x_active = s.codex.last_activity_secs.is_some()
+        || s.codex.sessions > 0
+        || s.codex.turns > 0
+        || s.codex.has_token_data;
     let o_active = s
         .opencode
         .as_ref()
-        .map(|o| o.sessions > 0 || o.has_token_data)
+        .map(|o| o.last_activity_secs.is_some() || o.sessions > 0 || o.has_token_data)
         .unwrap_or(false);
     let cp_active = matches!(&s.copilot, Status::Ok(_));
     let g_active = !s.grok.needs_login || s.grok.local_sessions > 0;

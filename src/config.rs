@@ -50,6 +50,11 @@ pub fn secrets_dir() -> PathBuf {
     plugin_config_dir().join("secrets")
 }
 
+/// fold-key → section mapping (settings page writes this)
+pub fn keymap_path() -> PathBuf {
+    plugin_config_dir().join("keymap.json")
+}
+
 pub fn state_dir() -> PathBuf {
     std::env::var("HERDR_PLUGIN_STATE_DIR")
         .map(PathBuf::from)

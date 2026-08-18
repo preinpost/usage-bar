@@ -58,7 +58,8 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 | `l`              | start Copilot login                     |
 | `g`              | show Grok login instructions            |
 | `r`              | refresh now (+ resync OpenRouter cache) |
-| `1`–`7`          | fold/unfold that provider section       |
+| `1`–`0`          | fold/unfold the section bound to that digit |
+| `?`              | settings — assign fold digits to sections  |
 | `j`/`k` or `↑`/`↓`| scroll the body (when it overflows)    |
 | `PgUp`/`PgDn`    | scroll by a page                        |
 | `↑`/`↓` / `k`/`j`| move in menus                           |
@@ -66,7 +67,10 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 
 The footer buttons are clickable with the mouse; provider rows in the Connect
 menu are clickable too. On the dashboard, the fold marker (`1▾ …`) left of each
-provider title is clickable, and the mouse wheel scrolls the body. On small
+provider title is clickable, and the mouse wheel scrolls the body. `?` opens
+the fold-key settings: highlight a section and press a digit (`1`–`0`) to bind
+it, `x` to unbind — bindings persist in `keymap.json`. Defaults are the
+registration order (Claude Code = 1 … OpenRouter = 7, 8/9/0 free). On small
 panes both the body and the Connect menu scroll (wheel / arrows), and modals
 size themselves to their content instead of overflowing.
 

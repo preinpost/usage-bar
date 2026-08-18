@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 
+use chrono::TimeZone;
+
 #[derive(Debug, Clone, Default)]
 pub struct Item {
     pub name: String,
@@ -34,6 +36,9 @@ pub struct LocalStats {
     pub sessions: u64,
     pub turns: u64,
     pub has_token_data: bool,
+    /// newest activity across all history (epoch secs) — proves the tool is
+    /// installed/used even when the current window has no data
+    pub last_activity_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -204,6 +209,18 @@ pub struct Snapshot {
     pub opencode_go: GoUsageStatus,
     pub openrouter: OpenRouterStatus,
     pub or_usage: Option<OpenRouterUsage>,
+}
+
+/// `MM-DD` of the newest local activity, or `—` when unknown.
+pub fn fmt_last_activity(secs: Option<i64>) -> String {
+    match secs {
+        Some(s) => chrono::Local
+            .timestamp_opt(s, 0)
+            .single()
+            .map(|t| t.format("%m-%d").to_string())
+            .unwrap_or_else(|| "—".into()),
+        None => "—".into(),
+    }
 }
 
 /// Compact count like `3.4k`, `34.9M`, `592.9M`, `1.25B`.
