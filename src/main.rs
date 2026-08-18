@@ -13,6 +13,7 @@ mod http;
 mod model;
 mod openrouter;
 mod providers;
+mod secrets;
 mod snapshot;
 mod ui;
 

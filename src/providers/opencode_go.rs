@@ -1,8 +1,9 @@
 //! OpenCode Go (opencode.ai): official quota/usage API.
 //!
-//! Key sources, in order: `OPENCODE_API_KEY` env, a key explicitly saved via
-//! `login opencode` / the TUI (secrets/opencode-go.json), then auto-detection
-//! from the pi credential store (`~/.pi/agent/auth.json`) or the opencode CLI
+//! Key sources, in order: `OPENCODE_API_KEY` env, an explicitly saved key
+//! (OS keyring, with the old `secrets/opencode-go.json` 0600 file as fallback
+//! — see `crate::secrets`), then auto-detection from the pi credential store
+//! (`~/.pi/agent/auth.json`) or the opencode CLI
 //! (`~/.local/share/opencode/auth.json`). The official usage endpoint
 //! (`GET /zen/go/v1/usage`, added upstream in "feat(console): add go usage
 //! endpoint") reports the rolling / weekly / monthly quota windows for the
@@ -30,11 +31,26 @@ use crate::model::{GoUsageStatus, GoUsageWindow};
 /// Official OpenCode Go usage/quota endpoint.
 const USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 
-fn saved_key_path(cfg: &Config) -> PathBuf {
-    cfg.secrets_dir.join("opencode-go.json")
+/// Account name in the OS keyring / fallback file (`secrets/opencode-go.json`).
+const ACCOUNT: &str = "opencode-go";
+
+/// Parse the saved key from its JSON blob (`api_key` or legacy `key`).
+fn parse_saved_key(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let k = v
+        .get("api_key")
+        .or_else(|| v.get("key"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    if k.is_empty() {
+        None
+    } else {
+        Some(k.to_string())
+    }
 }
 
-/// `OPENCODE_API_KEY` env → saved key (secrets/opencode-go.json) → auto-detect
+/// `OPENCODE_API_KEY` env → saved key (keyring, file fallback) → auto-detect
 /// from pi credential store (`~/.pi/agent/auth.json`) → opencode CLI
 /// (`~/.local/share/opencode/auth.json`). Auto-detection exists so a key
 /// already provisioned by pi/opencode works out of the box; saving a key via
@@ -53,9 +69,8 @@ pub fn load_key(cfg: &Config) -> Option<String> {
 /// Key lookup below the env check, with an explicit home root (injectable so
 /// tests can isolate the auto-detection paths).
 fn load_key_from(home: &str, cfg: &Config) -> Option<String> {
-    // 1) explicitly saved key (portable across harnesses)
-    let saved = saved_key_path(cfg);
-    if let Some(k) = file_key(&saved) {
+    // 1) explicitly saved key (OS keyring first, 0600 file fallback)
+    if let Some(k) = crate::secrets::read_json(cfg, ACCOUNT).and_then(|j| parse_saved_key(&j)) {
         return Some(k);
     }
     // 2) pi's credential store — opencode-go used from pi keeps its key here
@@ -72,43 +87,17 @@ fn load_key_from(home: &str, cfg: &Config) -> Option<String> {
     )
 }
 
-/// Save an explicitly pasted key (secrets/opencode-go.json, 0600).
+/// Save an explicitly pasted key: OS keyring when available, else the 0600
+/// `secrets/opencode-go.json` fallback file.
 pub fn save_key(cfg: &Config, key: &str) {
-    let _ = std::fs::create_dir_all(&cfg.secrets_dir);
     let data = serde_json::json!({ "api_key": key.trim() });
     if let Ok(text) = serde_json::to_string(&data) {
-        let p = saved_key_path(cfg);
-        let _ = std::fs::write(&p, text);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
+        crate::secrets::write_json(cfg, ACCOUNT, &text);
     }
 }
 
 pub fn clear_key(cfg: &Config) {
-    let _ = std::fs::remove_file(saved_key_path(cfg));
-}
-
-fn file_key(p: &Path) -> Option<String> {
-    let Ok(text) = std::fs::read_to_string(p) else {
-        return None;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return None;
-    };
-    let k = v
-        .get("api_key")
-        .or_else(|| v.get("key"))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim();
-    if k.is_empty() {
-        None
-    } else {
-        Some(k.to_string())
-    }
+    crate::secrets::delete(cfg, ACCOUNT);
 }
 
 fn auth_key<const N: usize>(path: &Path, prefs: [&str; N]) -> Option<String> {
@@ -231,6 +220,9 @@ mod tests {
     }
 
     fn cfg_with(dir: &Path) -> Config {
+        // Never touch the real macOS Keychain / Linux secret-service in tests:
+        // everything here exercises the 0600-file fallback path instead.
+        crate::secrets::force_file_mode_for_tests();
         Config {
             claude_budget: 0,
             codex_budget: 0,

@@ -1,6 +1,6 @@
 //! GitHub Copilot: OAuth device flow + internal usage API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -11,27 +11,11 @@ use crate::model::{CopilotQuota, CopilotStatus, Status};
 
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
+/// Account name in the OS keyring / fallback file (`secrets/copilot.json`).
+const ACCOUNT: &str = "copilot";
+
 fn token_path(cfg: &Config) -> PathBuf {
     cfg.secrets_dir.join("copilot.json")
-}
-
-/// All directories that may hold a saved token (env-managed or standalone).
-fn token_candidates(cfg: &Config) -> Vec<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut out = vec![token_path(cfg)];
-    if let Ok(env_dir) = std::env::var("HERDR_PLUGIN_CONFIG_DIR") {
-        if !env_dir.is_empty() {
-            out.push(PathBuf::from(env_dir).join("secrets").join("copilot.json"));
-        }
-    }
-    out.push(
-        PathBuf::from(&home)
-            .join(".config")
-            .join("usage-bar")
-            .join("secrets")
-            .join("copilot.json"),
-    );
-    out
 }
 
 fn now() -> u64 {
@@ -41,32 +25,78 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn load_token(cfg: &Config) -> Option<String> {
-    for p in token_candidates(cfg) {
-        if std::env::var("CODEBARX_DEBUG").is_ok() {
-            eprintln!("load_token path: {}", p.display());
-        }
-        if !p.exists() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&p).ok()?;
-        let v: Value = serde_json::from_str(&text).ok()?;
-        let tok = v.get("access_token")?.as_str()?.to_string();
+/// Parse a Copilot token JSON blob, returning it only while unexpired (7 days).
+fn parse_token(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let tok = v.get("access_token")?.as_str()?.to_string();
+    let created = v
+        .get("created_at")
+        .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
+        .unwrap_or(0);
+    if tok.is_empty() || created + 7 * 86400 < now() {
+        return None; // expired/empty
+    }
+    Some(tok)
+}
+
+fn parse_token_file(p: &Path) -> Option<String> {
+    let text = crate::secrets::read_file(p)?;
+    if std::env::var("CODEBARX_DEBUG").is_ok() {
+        eprintln!("load_token path: {}", p.display());
+    }
+    let v: Value = serde_json::from_str(&text).ok()?;
+    if std::env::var("CODEBARX_DEBUG").is_ok() {
         let created = v
             .get("created_at")
             .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
             .unwrap_or(0);
-        if std::env::var("CODEBARX_DEBUG").is_ok() {
-            eprintln!(
-                "  found token, created={created} now={} expired={}",
-                now(),
-                created + 7 * 86400 < now()
-            );
-        }
-        if tok.is_empty() || created + 7 * 86400 < now() {
-            continue; // expired/empty -> try next location
-        }
+        eprintln!(
+            "  found token, created={created} now={} expired={}",
+            now(),
+            created + 7 * 86400 < now()
+        );
+    }
+    let tok = v.get("access_token")?.as_str()?.to_string();
+    if tok.is_empty()
+        || v.get("created_at")
+            .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)))
+            .map(|created| created + 7 * 86400 < now())
+            .unwrap_or(false)
+    {
+        return None; // expired/empty
+    }
+    Some(tok)
+}
+
+/// Legacy config dirs that may hold a saved token outside the keyring:
+/// the plugin is pointed at `HERDR_PLUGIN_CONFIG_DIR` while a standalone
+/// install keeps a copy in the default `~/.config/usage-bar`, and vice versa.
+/// The `cfg.secrets_dir` copy is already handled by the keyring store, so it
+/// is skipped here to avoid re-scanning it.
+fn legacy_token_candidates(cfg: &Config) -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut out = Vec::new();
+    let default = PathBuf::from(&home)
+        .join(".config")
+        .join("usage-bar")
+        .join("secrets")
+        .join("copilot.json");
+    if default != token_path(cfg) {
+        out.push(default);
+    }
+    out
+}
+
+pub fn load_token(cfg: &Config) -> Option<String> {
+    // 1) OS keyring, with the `secrets_dir` file as its fallback
+    if let Some(tok) = crate::secrets::read_json(cfg, ACCOUNT).and_then(|j| parse_token(&j)) {
         return Some(tok);
+    }
+    // 2) legacy config dirs (plugin vs standalone sharing)
+    for p in legacy_token_candidates(cfg) {
+        if let Some(tok) = parse_token_file(&p) {
+            return Some(tok);
+        }
     }
     None
 }
@@ -78,21 +108,18 @@ fn as_u64(v: Option<&Value>) -> u64 {
 }
 
 pub fn save_token(cfg: &Config, token: &str) {
-    let _ = std::fs::create_dir_all(&cfg.secrets_dir);
     let data = serde_json::json!({ "access_token": token, "created_at": now() });
     if let Ok(text) = serde_json::to_string(&data) {
-        let p = token_path(cfg);
-        let _ = std::fs::write(&p, text);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
+        crate::secrets::write_json(cfg, ACCOUNT, &text);
     }
 }
 
 pub fn clear_token(cfg: &Config) {
-    let _ = std::fs::remove_file(token_path(cfg));
+    crate::secrets::delete(cfg, ACCOUNT);
+    // clear legacy copies from other config dirs too
+    for p in legacy_token_candidates(cfg) {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Run the GitHub device flow. `progress` receives human-readable lines shown
@@ -242,4 +269,55 @@ pub fn collect(cfg: &Config) -> Status {
         login,
         quotas,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering as AO};
+
+    fn tmp_cfg() -> Config {
+        // file-only: never touch the real keychain in tests
+        crate::secrets::force_file_mode_for_tests();
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, AO::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "usage-bar-copilot-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Config {
+            claude_budget: 0,
+            codex_budget: 0,
+            opencode_budget: 0,
+            reset_hour: 0,
+            refresh_seconds: 30,
+            show_no_data_providers: false,
+            prices: crate::config::Prices::default(),
+            secrets_dir: dir.join("secrets"),
+        }
+    }
+
+    #[test]
+    fn save_load_roundtrip_in_file_mode() {
+        let cfg = tmp_cfg();
+        save_token(&cfg, "gho_faketoken");
+        assert_eq!(load_token(&cfg).as_deref(), Some("gho_faketoken"));
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        // 8 days old → past the 7-day expiry window
+        let old = now() - 8 * 86400;
+        let stale =
+            serde_json::json!({ "access_token": "gho_stale", "created_at": old }).to_string();
+        assert_eq!(parse_token(&stale), None);
+
+        // fresh token inside the window passes
+        let fresh =
+            serde_json::json!({ "access_token": "gho_fresh", "created_at": now() }).to_string();
+        assert_eq!(parse_token(&fresh).as_deref(), Some("gho_fresh"));
+    }
 }

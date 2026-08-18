@@ -102,19 +102,25 @@ size themselves to their content instead of overflowing.
 
 ## Credentials
 
-Keys and tokens are stored in `<config>/secrets/` with `0600` permissions.
+Provider credentials are stored in the **OS keyring** when available —
+macOS Keychain, Windows Credential Manager, or Linux Secret Service
+(gnome-keyring / KWallet) — under the `usage-bar` service namespace. On
+machines without a reachable secure store (headless Linux, CI, locked
+keychain) they transparently fall back to `<config>/secrets/` with `0600`
+permissions, and legacy files are promoted into the keyring on first read
+(new tokens still go through the file only if the keyring is unusable).
 Config dir: `$HERDR_PLUGIN_CONFIG_DIR` or `~/.config/usage-bar`.
 
-| Provider    | Config file                    | Env fallback             |
-| ----------- | ------------------------------ | ------------------------ |
-| Copilot     | `secrets/copilot.json`         | — (device flow only)     |
-| OpenRouter  | `secrets/openrouter.json`      | `OPENROUTER_API_KEY`     |
-| OpenCode Go | `secrets/opencode-go.json`     | `OPENCODE_API_KEY`       |
-| Grok        | `~/.grok/auth.json`            | `GROK_OAUTH_TOKEN`       |
+| Provider    | Keyring account / file      | Env fallback             |
+| ----------- | --------------------------- | ------------------------ |
+| Copilot     | `secrets/copilot.json`      | — (device flow only)     |
+| OpenRouter  | `secrets/openrouter.json`   | `OPENROUTER_API_KEY`     |
+| OpenCode Go | `secrets/opencode-go.json`  | `OPENCODE_API_KEY`       |
+| Grok        | `~/.grok/auth.json`         | `GROK_OAUTH_TOKEN`       |
 
 OpenCode Go is also auto-detected from `~/.pi/agent/auth.json` (pi's
 credential store) and `~/.local/share/opencode/auth.json` when no key was
-saved explicitly. Saved key priority: env → saved key → auto-detection.
+saved explicitly. Saved key priority: env → keyring → auto-detection.
 
 ## Config
 

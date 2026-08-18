@@ -25,6 +25,7 @@ cipher = "0.4"
 hmac = "0.12"
 sha1 = "0.10"
 pbkdf2 = "0.12"
+keyring = "4"
 
 [profile.release]
 lto = true

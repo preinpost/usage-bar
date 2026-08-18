@@ -22,7 +22,26 @@ fn key_path(cfg: &Config) -> PathBuf {
     cfg.secrets_dir.join("openrouter.json")
 }
 
-/// Key sources: `OPENROUTER_API_KEY` env first, then a saved secrets file.
+/// Account name in the OS keyring / fallback file (`secrets/openrouter.json`).
+const ACCOUNT: &str = "openrouter";
+
+fn parse_key(text: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let k = v
+        .get("api_key")
+        .or_else(|| v.get("key"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    if k.is_empty() {
+        None
+    } else {
+        Some(k.to_string())
+    }
+}
+
+/// Key sources: `OPENROUTER_API_KEY` env first, then the OS keyring (with the
+/// `secrets_dir` fallback file), then the standalone default config dir.
 pub fn load_key(cfg: &Config) -> Option<String> {
     if let Ok(k) = std::env::var("OPENROUTER_API_KEY") {
         let k = k.trim().to_string();
@@ -30,55 +49,39 @@ pub fn load_key(cfg: &Config) -> Option<String> {
             return Some(k);
         }
     }
-    let mut candidates = vec![key_path(cfg)];
+    // 1) OS keyring, with the `secrets_dir` file as its fallback
+    if let Some(k) = crate::secrets::read_json(cfg, ACCOUNT).and_then(|j| parse_key(&j)) {
+        return Some(k);
+    }
+    // 2) standalone default config dir (legacy sharing with the plugin)
+    let mut candidates = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".config")
-                .join("usage-bar")
-                .join("secrets")
-                .join("openrouter.json"),
-        );
+        let default = PathBuf::from(home)
+            .join(".config")
+            .join("usage-bar")
+            .join("secrets")
+            .join("openrouter.json");
+        if default != key_path(cfg) {
+            candidates.push(default);
+        }
     }
     for p in candidates {
-        if !p.exists() {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&p) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let k = v
-            .get("api_key")
-            .or_else(|| v.get("key"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim();
-        if !k.is_empty() {
-            return Some(k.to_string());
+        if let Some(k) = crate::secrets::read_file(&p).and_then(|j| parse_key(&j)) {
+            return Some(k);
         }
     }
     None
 }
 
 pub fn save_key(cfg: &Config, key: &str) {
-    let _ = std::fs::create_dir_all(&cfg.secrets_dir);
     let data = serde_json::json!({ "api_key": key.trim(), "saved_at": now() });
     if let Ok(text) = serde_json::to_string(&data) {
-        let p = key_path(cfg);
-        let _ = std::fs::write(&p, text);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
-        }
+        crate::secrets::write_json(cfg, ACCOUNT, &text);
     }
 }
 
 pub fn clear_key(cfg: &Config) {
-    let _ = std::fs::remove_file(key_path(cfg));
+    crate::secrets::delete(cfg, ACCOUNT);
 }
 
 fn now() -> u64 {
