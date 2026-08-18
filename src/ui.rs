@@ -1705,7 +1705,6 @@ fn build_body(
             body.divider(width);
         }
         let x = &snap.codex;
-        let has_win = x.sessions > 0 || x.turns > 0 || x.has_token_data;
         let token_s = if x.has_token_data {
             format!(
                 "in {} · out {} · cache {}",
