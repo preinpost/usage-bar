@@ -45,73 +45,10 @@ jobs:
         run: echo "releasing v${{ steps.bump.outputs.version }}"
 
   build:
-    name: Build ${{ matrix.name }}
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: v${{ needs.bump.outputs.version }}
     needs: bump
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # native runners for 5 of 6 combos — no QEMU/container needed
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: linux-amd64
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            name: linux-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            name: macos-amd64
-          - os: macos-15
-            target: aarch64-apple-darwin
-            name: macos-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: windows-amd64
-          # no public Windows-arm64 runner → cross-compile with cargo-zigbuild
-          - os: ubuntu-latest
-            target: aarch64-pc-windows-msvc
-            name: windows-arm64
-            zigbuild: true
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: v${{ needs.bump.outputs.version }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: .
-      - if: matrix.zigbuild
-        uses: mlugg/setup-zig@v1
-      - if: matrix.zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-      - name: Build
-        shell: bash
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --target "${{ matrix.target }}" --locked
-          else
-            cargo build --release --target "${{ matrix.target }}" --locked
-          fi
-      # macOS arm64 refuses to run unsigned binaries — ad-hoc signature
-      - name: Ad-hoc codesign (macOS)
-        if: runner.os == 'macOS'
-        run: codesign --force -s - "target/${{ matrix.target }}/release/usage-bar"
-      - name: Package
-        shell: bash
-        run: |
-          ext=""
-          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
-          cp "target/${{ matrix.target }}/release/usage-bar$ext" "usage-bar-${{ matrix.name }}$ext"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: usage-bar-${{ matrix.name }}
-          path: usage-bar-${{ matrix.name }}*
-          if-no-files-found: error
 
   release:
     name: Create GitHub release

@@ -123,11 +123,17 @@ cargo clippy --all-targets
 
 ## Release
 
-GitHub Actions workflow (`.github/workflows/release.yml`) builds and publishes
-a release with 6 binaries (Linux / macOS / Windows × amd64 / arm64):
+GitHub Actions builds and publishes 6 binaries (Linux / macOS / Windows ×
+amd64 / arm64) via a shared build workflow (`.github/workflows/build.yml`):
 
-- 5 combos build on native GitHub-hosted runners (no QEMU), Windows arm64 is
-  cross-compiled with cargo-zigbuild (no public arm64 Windows runner yet)
+- **Every push to main** (`.github/workflows/ci.yml`) rebuilds all 6 targets
+  and refreshes the rolling **nightly** release, so the latest main is always
+  downloadable; tests run on ubuntu as well
+- **Versioned releases** stay manual (`release.yml`):
+
+- 5 of 6 combos build on native GitHub-hosted runners (no QEMU), Windows
+  arm64 is cross-compiled with cargo-zigbuild (no public arm64 Windows runner
+  yet)
 - run it from the **Actions → bump & release → Run workflow**, optionally with
   an explicit version (default: auto patch/minor/major bump from Cargo.toml)
 - the workflow bumps the version (Cargo.toml + Cargo.lock), commits, tags
