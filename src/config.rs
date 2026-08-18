@@ -74,10 +74,7 @@ pub fn load() -> Config {
     };
     let candidates = [
         plugin_config_dir().join("config.json"),
-        home()
-            .join(".config")
-            .join("usage-bar")
-            .join("config.json"),
+        home().join(".config").join("usage-bar").join("config.json"),
     ];
     for p in candidates {
         if let Ok(text) = std::fs::read_to_string(&p) {

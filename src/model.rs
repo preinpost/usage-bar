@@ -41,6 +41,19 @@ pub struct LocalStats {
     pub last_activity_secs: Option<i64>,
 }
 
+impl LocalStats {
+    /// Whether the tool is worth showing: data in the current window, or
+    /// activity within the last week. Stale installs (months-old last
+    /// activity) stay hidden instead of cluttering the dashboard.
+    pub fn active_recent(&self) -> bool {
+        let recent = self
+            .last_activity_secs
+            .map(|s| chrono::Utc::now().timestamp() - s <= 7 * 86_400)
+            .unwrap_or(false);
+        recent || self.msgs > 0 || self.sessions > 0 || self.turns > 0 || self.has_token_data
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CopilotQuota {
     pub name: String,
@@ -320,6 +333,23 @@ mod tests {
             reasoning: 5,
         };
         assert_eq!(t.total(), 15);
+    }
+
+    #[test]
+    fn local_stats_active_recent_filters_stale_installs() {
+        let now = chrono::Utc::now().timestamp();
+        // two-month-old install without window data → hidden
+        let mut stale = LocalStats::default();
+        stale.last_activity_secs = Some(now - 60 * 86_400);
+        assert!(!stale.active_recent());
+        // recent activity without window data → visible (placeholder)
+        let mut recent = LocalStats::default();
+        recent.last_activity_secs = Some(now - 2 * 86_400);
+        assert!(recent.active_recent());
+        // window data always counts
+        let mut today = LocalStats::default();
+        today.msgs = 1;
+        assert!(today.active_recent());
     }
 
     #[test]

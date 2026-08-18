@@ -1613,19 +1613,14 @@ fn build_body(
     // Set `show_no_data_providers: true` in config.json to opt back into the
     // always-show-everything layout.
     let show_all = cfg.show_no_data_providers;
-    // local tools (filesystem data) show whenever they have ever been used,
-    // with a placeholder when the current window is empty
-    let c_active = snap.claude.last_activity_secs.is_some()
-        || snap.claude.msgs > 0
-        || snap.claude.has_token_data;
-    let x_active = snap.codex.last_activity_secs.is_some()
-        || snap.codex.sessions > 0
-        || snap.codex.turns > 0
-        || snap.codex.has_token_data;
+    // local tools (filesystem data) show only when used recently or with data
+    // in the current window — stale installs stay hidden
+    let c_active = snap.claude.active_recent();
+    let x_active = snap.codex.active_recent();
     let o_active = snap
         .opencode
         .as_ref()
-        .map(|o| o.last_activity_secs.is_some() || o.sessions > 0 || o.has_token_data)
+        .map(|o| o.active_recent())
         .unwrap_or(false);
     let cp_active = matches!(&snap.copilot, Status::Ok(_));
     let g_active = !snap.grok.needs_login || snap.grok.local_sessions > 0;
