@@ -2678,6 +2678,10 @@ mod tests {
 
     #[test]
     fn settings_modal_binds_digits_via_keys() {
+        // the settings keys persist on every change — back up the real file
+        // so this test never clobbers the user's keymap
+        let km_path = crate::config::keymap_path();
+        let backup = std::fs::read(&km_path).ok();
         let cfg = crate::config::load();
         let mut modal: Option<Modal> = None;
         let mut next = Instant::now();
@@ -2719,6 +2723,14 @@ mod tests {
         // Esc closes the page
         send('q', &mut modal, &mut km);
         assert!(modal.is_none());
+
+        // restore the user's keymap
+        match backup {
+            Some(bytes) => std::fs::write(&km_path, bytes).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&km_path);
+            }
+        }
     }
 
     #[test]
