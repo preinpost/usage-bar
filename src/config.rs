@@ -1,4 +1,4 @@
-//! Config: HERDR_PLUGIN_CONFIG_DIR/config.json or ~/.config/codexbar-status/config.json
+//! Config: HERDR_PLUGIN_CONFIG_DIR/config.json or ~/.config/usage-bar/config.json
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ fn home() -> PathBuf {
 pub fn plugin_config_dir() -> PathBuf {
     std::env::var("HERDR_PLUGIN_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".config").join("codexbar-status"))
+        .unwrap_or_else(|_| home().join(".config").join("usage-bar"))
 }
 
 pub fn secrets_dir() -> PathBuf {
@@ -58,7 +58,7 @@ pub fn keymap_path() -> PathBuf {
 pub fn state_dir() -> PathBuf {
     std::env::var("HERDR_PLUGIN_STATE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".config").join("codexbar-status").join("state"))
+        .unwrap_or_else(|_| home().join(".config").join("usage-bar").join("state"))
 }
 
 pub fn load() -> Config {
@@ -76,7 +76,7 @@ pub fn load() -> Config {
         plugin_config_dir().join("config.json"),
         home()
             .join(".config")
-            .join("codexbar-status")
+            .join("usage-bar")
             .join("config.json"),
     ];
     for p in candidates {
@@ -127,6 +127,37 @@ pub fn load() -> Config {
 pub fn ensure_dirs(cfg: &Config) {
     let _ = std::fs::create_dir_all(&cfg.secrets_dir);
     let _ = std::fs::create_dir_all(state_dir());
+    migrate_legacy_config();
+}
+
+/// One-time merge of the pre-rename `~/.config/codexbar-status` config dir
+/// into `~/.config/usage-bar` so saved keys/tokens/keymaps survive the rename.
+/// Only files missing in the new dir are copied (idempotent, non-destructive).
+fn migrate_legacy_config() {
+    let new_cfg = plugin_config_dir();
+    let old_cfg = home().join(".config").join("codexbar-status");
+    if new_cfg == old_cfg || !old_cfg.is_dir() {
+        return;
+    }
+    let _ = merge_tree(&old_cfg, &new_cfg);
+}
+
+fn merge_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use walkdir::WalkDir;
+    for entry in WalkDir::new(from).into_iter().filter_map(Result::ok) {
+        let p = entry.path();
+        let rel = p.strip_prefix(from).unwrap_or(p);
+        let dst = to.join(rel);
+        if p.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+        } else if !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(p, &dst)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn claude_projects_dir() -> PathBuf {

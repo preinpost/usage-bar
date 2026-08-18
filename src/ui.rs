@@ -2551,6 +2551,10 @@ mod tests {
 
     #[test]
     fn digit_key_toggles_a_section() {
+        // folding persists — back up the real state file so the test never
+        // clobbers the user's collapsed sections
+        let st_path = crate::config::state_dir().join("collapsed.json");
+        let backup = std::fs::read(&st_path).ok();
         let cfg = crate::config::load();
         let mut modal: Option<Modal> = None;
         let mut next = Instant::now();
@@ -2583,6 +2587,14 @@ mod tests {
         )
         .unwrap();
         assert!(quit);
+
+        // restore the real collapsed.json
+        match backup {
+            Some(bytes) => std::fs::write(&st_path, bytes).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&st_path);
+            }
+        }
     }
 
     #[test]

@@ -24,23 +24,23 @@ Each provider shows only when it is actually connected or has data this window
 
 ```sh
 cargo build --release
-# binary: target/release/herdr-codexbar-tui
+# binary: target/release/usage-bar
 ```
 
 ## Usage
 
 ```sh
-herdr-codexbar-tui                    # live TUI dashboard
-herdr-codexbar-tui status             # one-shot text summary (for actions/scripts)
-herdr-codexbar-tui status --json      # JSON snapshot
-herdr-codexbar-tui watch --json       # same, via watch mode
-herdr-codexbar-tui login copilot      # GitHub Copilot device flow (prints code, polls, saves token)
-herdr-codexbar-tui login grok         # instructions (grok login / GROK_OAUTH_TOKEN)
-herdr-codexbar-tui login openrouter   # paste an API key (sk-or-...)
-herdr-codexbar-tui login opencode     # paste an OpenCode Go key (sk-...)
-herdr-codexbar-tui logout             # clear ALL saved tokens/keys
-herdr-codexbar-tui logout opencode    # clear one provider only (copilot|openrouter|opencode|grok|all)
-herdr-codexbar-tui sync-openrouter    # refresh the per-model usage cache from the web dashboard
+usage-bar                    # live TUI dashboard
+usage-bar status             # one-shot text summary (for actions/scripts)
+usage-bar status --json      # JSON snapshot
+usage-bar watch --json       # same, via watch mode
+usage-bar login copilot      # GitHub Copilot device flow (prints code, polls, saves token)
+usage-bar login grok         # instructions (grok login / GROK_OAUTH_TOKEN)
+usage-bar login openrouter   # paste an API key (sk-or-...)
+usage-bar login opencode     # paste an OpenCode Go key (sk-...)
+usage-bar logout             # clear ALL saved tokens/keys
+usage-bar logout opencode    # clear one provider only (copilot|openrouter|opencode|grok|all)
+usage-bar sync-openrouter    # refresh the per-model usage cache from the web dashboard
 ```
 
 ### JSON output
@@ -77,7 +77,7 @@ size themselves to their content instead of overflowing.
 ## Credentials
 
 Keys and tokens are stored in `<config>/secrets/` with `0600` permissions.
-Config dir: `$HERDR_PLUGIN_CONFIG_DIR` or `~/.config/codexbar-status`.
+Config dir: `$HERDR_PLUGIN_CONFIG_DIR` or `~/.config/usage-bar`.
 
 | Provider    | Config file                    | Env fallback             |
 | ----------- | ------------------------------ | ------------------------ |
@@ -92,7 +92,7 @@ saved explicitly. Saved key priority: env → saved key → auto-detection.
 
 ## Config
 
-`~/.config/codexbar-status/config.json` (or `$HERDR_PLUGIN_CONFIG_DIR`):
+`~/.config/usage-bar/config.json` (or `$HERDR_PLUGIN_CONFIG_DIR`):
 
 ```json
 {

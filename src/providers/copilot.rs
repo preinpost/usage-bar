@@ -15,7 +15,7 @@ fn token_path(cfg: &Config) -> PathBuf {
     cfg.secrets_dir.join("copilot.json")
 }
 
-/// All directories that may hold a saved token (herdr-managed or standalone).
+/// All directories that may hold a saved token (env-managed or standalone).
 fn token_candidates(cfg: &Config) -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut out = vec![token_path(cfg)];
@@ -27,17 +27,7 @@ fn token_candidates(cfg: &Config) -> Vec<PathBuf> {
     out.push(
         PathBuf::from(&home)
             .join(".config")
-            .join("herdr")
-            .join("plugins")
-            .join("config")
-            .join("local.codexbar")
-            .join("secrets")
-            .join("copilot.json"),
-    );
-    out.push(
-        PathBuf::from(&home)
-            .join(".config")
-            .join("codexbar-status")
+            .join("usage-bar")
             .join("secrets")
             .join("copilot.json"),
     );

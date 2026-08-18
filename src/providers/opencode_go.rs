@@ -224,7 +224,7 @@ mod tests {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, AO::SeqCst);
         let d =
-            std::env::temp_dir().join(format!("codexbar-ogo-test-{}-{}", std::process::id(), n));
+            std::env::temp_dir().join(format!("usage-bar-ogo-test-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

@@ -1,4 +1,4 @@
-//! herdr-codexbar-tui — ratatui usage dashboard for Herdr plugin panes.
+//! usage-bar — ratatui usage dashboard for coding agents.
 //!
 //! Modes:
 //!   watch (default)  full TUI dashboard

@@ -35,7 +35,7 @@ pub fn load_key(cfg: &Config) -> Option<String> {
         candidates.push(
             PathBuf::from(home)
                 .join(".config")
-                .join("codexbar-status")
+                .join("usage-bar")
                 .join("secrets")
                 .join("openrouter.json"),
         );
@@ -95,7 +95,7 @@ fn num(o: &Value, key: &str) -> f64 {
 }
 
 /// Fetch credits balance + (optional) key spending limit. Mirror of the
-/// CodexBar OpenRouter provider: `/credits` is the required source, `/key` is
+/// OpenRouter provider: `/credits` is the required source, `/key` is
 /// a best-effort enrichment (may be slow/unavailable → degrade to credits only).
 pub fn collect(cfg: &Config) -> OpenRouterStatus {
     let Some(key) = load_key(cfg) else {
