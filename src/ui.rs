@@ -777,8 +777,8 @@ fn draw_dashboard(
 /// (action, label, start_x, end_x_exclusive) measured from the footer's left edge.
 fn footer_layout() -> Vec<(Action, &'static str, u16, u16)> {
     let labels: [(&str, Action); 3] = [
-        ("[C] Connect", Action::Connect),
-        ("[R] Refresh", Action::Refresh),
+        ("[c] Connect", Action::Connect),
+        ("[r] Refresh", Action::Refresh),
         ("[q] Close", Action::Close),
     ];
     let mut out = Vec::with_capacity(labels.len());
@@ -1392,7 +1392,7 @@ fn build_body(cfg: &Config, snap: &Snapshot, folded: CollapseState, width: usize
 
     if !any_active {
         body.msg(
-            "no active providers — press [C] Connect or run a CLI first".into(),
+            "no active providers — press [c] Connect or run a CLI first".into(),
             Color::DarkGray,
             false,
         );
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[test]
     fn footer_click_ranges_pick_the_right_action() {
-        // footer text: "[C] Connect   [R] Refresh   [q] Close"
+        // footer text: "[c] Connect   [r] Refresh   [q] Close"
         let layout = footer_layout();
         // Connect = cols 0..11, Refresh = 14..23, Close = 26..34
         assert_eq!(layout[0].0, Action::Connect);
