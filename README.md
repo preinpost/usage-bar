@@ -22,25 +22,51 @@ Each provider shows only when it is actually connected or has data this window
 
 ## Install
 
+Prebuilt binaries for linux / macos / windows (amd64 + arm64) are published on
+every GitHub [release](https://github.com/preinpost/usage-bar/releases), ad-hoc
+codesigned on macOS and produced by GitHub Actions.
+
+### mise (recommended)
+
+```sh
+mise use github:preinpost/usage-bar          # latest release
+mise use github:preinpost/usage-bar@0.1.2    # pin a version
+mise x github:preinpost/usage-bar -- ub status   # run once, no config
+```
+
+mise auto-detects the right per-platform binary, verifies GitHub artifact
+attestations + SLSA provenance, strips the `-<os>-<arch>` suffix, and puts
+`ub` on PATH. For a team, pin it portably in `mise.toml`:
+
+```toml
+[tool_alias]
+ub = "github:preinpost/usage-bar"
+
+[tools.ub]
+version = "0.1.2"
+```
+
+### from source
+
 ```sh
 cargo build --release
-# binary: target/release/usage-bar
+# binary: target/release/ub
 ```
 
 ## Usage
 
 ```sh
-usage-bar                    # live TUI dashboard
-usage-bar status             # one-shot text summary (for actions/scripts)
-usage-bar status --json      # JSON snapshot
-usage-bar watch --json       # same, via watch mode
-usage-bar login copilot      # GitHub Copilot device flow (prints code, polls, saves token)
-usage-bar login grok         # instructions (grok login / GROK_OAUTH_TOKEN)
-usage-bar login openrouter   # paste an API key (sk-or-...)
-usage-bar login opencode     # paste an OpenCode Go key (sk-...)
-usage-bar logout             # clear ALL saved tokens/keys
-usage-bar logout opencode    # clear one provider only (copilot|openrouter|opencode|grok|all)
-usage-bar sync-openrouter    # refresh the per-model usage cache from the web dashboard
+ub                          # live TUI dashboard
+ub status                   # one-shot text summary (for actions/scripts)
+ub status --json            # JSON snapshot
+ub watch --json             # same, via watch mode
+ub login copilot            # GitHub Copilot device flow (prints code, polls, saves token)
+ub login grok               # instructions (grok login / GROK_OAUTH_TOKEN)
+ub login openrouter         # paste an API key (sk-or-...)
+ub login opencode           # paste an OpenCode Go key (sk-...)
+ub logout                   # clear ALL saved tokens/keys
+ub logout opencode          # clear one provider only (copilot|openrouter|opencode|grok|all)
+ub sync-openrouter          # refresh the per-model usage cache from the web dashboard
 ```
 
 ### JSON output

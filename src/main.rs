@@ -20,6 +20,16 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("{} {}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_usage();
+        return ExitCode::SUCCESS;
+    }
+
     let json_out = args.iter().any(|a| a == "--json");
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
@@ -167,6 +177,35 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_usage() {
+    println!(
+        "{} {} — terminal usage dashboard for AI coding agents",
+        env!("CARGO_BIN_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("USAGE:");
+    println!("  ub                              live TUI dashboard (default)");
+    println!("  ub status                       one-shot text summary (for scripts)");
+    println!("  ub status --json                JSON snapshot");
+    println!("  ub watch --json                 JSON snapshot via watch mode");
+    println!("  ub login copilot                GitHub Copilot device-flow login");
+    println!("  ub login grok                   show Grok login instructions");
+    println!("  ub login openrouter             paste an OpenRouter API key");
+    println!("  ub login opencode               paste an OpenCode Go API key");
+    println!(
+        "  ub logout [provider]            clear saved tokens (all | copilot | openrouter | opencode | grok)"
+    );
+    println!("  ub sync-openrouter              refresh per-model usage cache from web dashboard");
+    println!();
+    println!("OPTIONS:");
+    println!("  -V, --version                    print version and exit");
+    println!("  -h, --help                       show this help");
+    println!("  --json                           JSON output (with status / watch)");
+    println!();
+    println!("TUI KEYS: q/x/Esc quit · c Connect menu · l Copilot login · g Grok login · r refresh");
 }
 
 fn print_json(snap: &model::Snapshot) {
