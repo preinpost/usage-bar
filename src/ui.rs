@@ -2099,6 +2099,14 @@ fn build_body(
                                     for m in u.today_models.iter().take(2) {
                                         body.push(model_line(&m.label, m.tokens, m.cost, width));
                                     }
+                                } else if !crate::openrouter::dashboard_supported() {
+                                    // basic (API) view is shown above; per-model
+                                    // breakdown needs the Chrome-cookie dashboard sync
+                                    body.msg(
+                                        "  per-model: web-dashboard sync not supported on this platform".into(),
+                                        Color::DarkGray,
+                                        false,
+                                    );
                                 }
                             }
                         }

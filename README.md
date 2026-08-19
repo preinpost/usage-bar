@@ -75,8 +75,10 @@ macOS it decrypts the Chrome cookies with the Keychain + AES-128-CBC; on
 Windows it unwraps the DPAPI key from `Local State` and decrypts the
 AES-256-GCM cookies. Requires an active openrouter.ai login in the default
 Chrome profile; Chrome 127+ App-Bound Encryption (`v20/v21`) cookies are not
-supported yet (the sync reports a clear error). Linux currently skips the
-dashboard sync.
+supported yet (the sync reports a clear error). On platforms without the
+Chrome-cookie pull (Linux, and headless environments) the per-model breakdown
+is omitted and usage falls back to the public-API credits / key / windowed-
+spend view — the provider still works, just without per-model detail.
 
 ### JSON output
 

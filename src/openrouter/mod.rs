@@ -7,6 +7,13 @@ mod usage;
 pub use dashboard::sync_now;
 pub use usage::{is_stale, load, sync_async};
 
+/// Can the web-dashboard (per-model model-usage) sync run here? macOS/Windows
+/// scrape the Chrome session; other platforms have no supported cookie pull and
+/// degrade to the public-API (credits / key / windowed spend) view only.
+pub fn dashboard_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

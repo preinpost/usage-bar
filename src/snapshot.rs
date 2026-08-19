@@ -270,6 +270,12 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
                         );
                     }
                 }
+            } else if !crate::openrouter::dashboard_supported() {
+                // public-API credits/key view above; per-model needs the dashboard sync
+                let _ = write!(
+                    out,
+                    "  per-model: web-dashboard sync not supported on this platform\n"
+                );
             }
         }
     }
