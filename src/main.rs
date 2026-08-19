@@ -173,6 +173,29 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "logs" => {
+            // recent OpenRouter requests (web-dashboard / Chrome-session auth)
+            let limit: u32 = positional
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(25)
+                .clamp(1, 200);
+            match openrouter::fetch(limit, None) {
+                Ok(logs) => {
+                    if json_out {
+                        print_logs_json(&logs);
+                    } else {
+                        println!("OpenRouter recent requests (newest first):");
+                        println!("{}", openrouter::summarize(&logs));
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("logs failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("unknown mode: {mode} (watch | status | login | logout)");
             ExitCode::FAILURE
@@ -200,13 +223,14 @@ fn print_usage() {
         "  ub logout [provider]            clear saved tokens (all | copilot | openrouter | opencode | grok)"
     );
     println!("  ub sync-openrouter              refresh per-model usage cache from web dashboard");
+    println!("  ub logs [limit]                  recent OpenRouter requests (default 25)");
     println!();
     println!("OPTIONS:");
     println!("  -V, --version                    print version and exit");
     println!("  -h, --help                       show this help");
     println!("  --json                           JSON output (with status / watch)");
     println!();
-    println!("TUI KEYS: q/x/Esc quit · c Connect menu · l Copilot login · g Grok login · r refresh");
+    println!("TUI KEYS: q/x/Esc quit · c Connect menu · l Copilot login · g Grok login · o OpenRouter logs · r refresh");
 }
 
 fn print_json(snap: &model::Snapshot) {
@@ -292,6 +316,36 @@ fn print_json(snap: &model::Snapshot) {
             "today": { "total": u.today_total, "models": u.today_models.iter().map(|m| serde_json::json!({ "label": m.label, "cost": m.cost, "tokens": m.tokens })).collect::<Vec<_>>() },
             "month": { "total": u.month_total, "models": u.month_models.iter().map(|m| serde_json::json!({ "label": m.label, "cost": m.cost, "tokens": m.tokens })).collect::<Vec<_>>() },
         })),
+    });
+    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+}
+
+fn print_logs_json(logs: &model::OrLogs) {
+    let v = serde_json::json!({
+        "can_view_private_prompt_logs": logs.can_view_private_prompt_logs,
+        "entries": logs.entries.iter().map(|e| serde_json::json!({
+            "generation_id": e.generation_id,
+            "request_id": e.request_id,
+            "model": e.model,
+            "provider": e.provider,
+            "app": e.app,
+            "api_key": e.api_key,
+            "api_type": e.api_type,
+            "created_at": e.created_at,
+            "tokens_prompt": e.tokens_prompt,
+            "tokens_completion": e.tokens_completion,
+            "tokens_cached": e.tokens_cached,
+            "tokens_prompt_native": e.tokens_prompt_native,
+            "tokens_reasoning": e.tokens_reasoning,
+            "response_cached": e.response_cached,
+            "cost": e.cost,
+            "latency_ms": e.latency_ms,
+            "generation_time_ms": e.generation_time_ms,
+            "tps": openrouter::tps(e),
+            "finish_reason": e.finish_reason,
+            "streamed": e.streamed,
+            "cancelled": e.cancelled,
+        })).collect::<Vec<_>>(),
     });
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
 }

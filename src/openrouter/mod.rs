@@ -2,9 +2,14 @@
 //! sync (dashboard.rs pulls the Chrome session; usage.rs reads the cache).
 
 mod dashboard;
+mod logs;
 mod usage;
 
 pub use dashboard::sync_now;
+pub use logs::{
+    cell_ellipsized, fetch, fit_cell, full_cell, header_cells, log_table_width, row_cells,
+    summarize, summary_cells, tps, LOG_COLUMNS, LOG_COL_SEP,
+};
 pub use usage::{is_stale, load, sync_async};
 
 /// Can the web-dashboard (per-model model-usage) sync run here? macOS/Windows

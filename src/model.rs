@@ -198,6 +198,48 @@ pub struct ModelUsage {
     pub tokens: u64,
 }
 
+/// One recent OpenRouter request/transaction, from the web dashboard's
+/// private `user-transactions` endpoint (latest first).
+#[derive(Debug, Clone, Default)]
+pub struct OrLogEntry {
+    pub generation_id: String,
+    pub request_id: String,
+    pub model: String,
+    pub provider: String,
+    /// app/source title (e.g. `pi`), empty when none
+    pub app: String,
+    /// API-key label/name used by the request
+    pub api_key: String,
+    pub api_type: String,
+    /// unix seconds (UTC)
+    pub created_at: i64,
+    pub tokens_prompt: u64,
+    pub tokens_completion: u64,
+    /// native cached (prompt-cache read) tokens
+    pub tokens_cached: u64,
+    /// native prompt tokens (cache-rate denominator); 0 when not reported
+    pub tokens_prompt_native: u64,
+    /// reasoning tokens (native), 0 when not reported
+    pub tokens_reasoning: u64,
+    pub cost: f64,
+    /// end-to-end latency (ms, to first token)
+    pub latency_ms: u64,
+    /// generation duration (ms)
+    pub generation_time_ms: u64,
+    pub finish_reason: String,
+    pub streamed: bool,
+    pub cancelled: bool,
+    /// the whole response was served from the response cache (cache replay)
+    pub response_cached: bool,
+}
+
+/// Result of a `user-transactions` fetch.
+pub struct OrLogs {
+    /// web-dashboard permission: whether prompt/response bodies are viewable
+    pub can_view_private_prompt_logs: bool,
+    pub entries: Vec<OrLogEntry>,
+}
+
 /// Per-model + daily/monthly usage pulled from the OpenRouter web dashboard
 /// (via the internalized `or_sync` / `sync-openrouter` cache).
 #[derive(Debug, Clone, Default)]

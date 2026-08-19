@@ -87,7 +87,127 @@ enum Modal {
     Login(LoginState),
     /// `?` settings: assign fold digits (1..0) to sections
     Settings(SettingsState),
+    /// `o` / Connect-menu: recent OpenRouter request log (scrollable)
+    Logs(LogsState),
 }
+
+/// Async result holder shared between the fetch thread and the drawer.
+#[derive(Default)]
+enum LogsData {
+    #[default]
+    Loading,
+    Ready {
+        can_view_private: bool,
+        entries: Vec<crate::model::OrLogEntry>,
+    },
+    Error(String),
+}
+
+/// OpenRouter request-log view state.
+struct LogsState {
+    data: Arc<Mutex<LogsData>>,
+    scroll: usize,
+    /// horizontal pan offset (columns hidden on the left)
+    xoff: usize,
+    /// active mouse-drag origin for panning logs
+    drag: Option<DragState>,
+    /// a background fetch (initial or auto) is currently in flight
+    fetching: Arc<AtomicBool>,
+    /// when the next automatic refresh is due while the modal is open
+    next_refresh: Instant,
+    /// seconds between automatic refreshes
+    auto_secs: u64,
+    /// click-to-reveal bubble for a `..`-truncated cell: (column label, value)
+    tip: Option<(String, String)>,
+}
+
+/// Where a press went down, so drags can pan by the delta from here.
+struct DragState {
+    x0: u16,
+    y0: u16,
+}
+
+/// Map a click (inside the logs modal) to a `..`-truncated cell's full value.
+/// Returns the reveal bubble `(label, full value)`, or `None` when the click
+/// doesn't land on a cell that was shortened.
+fn cell_tip_at(ls: &LogsState, rect: Rect, col: u16, row: u16) -> Option<(String, String)> {
+    if col <= rect.x || col >= rect.x + rect.width - 1 || row <= rect.y + 1 {
+        return None; // outside the inner area / on border or header
+    }
+    let inner_top = rect.y + 2; // first data row
+    if row < inner_top {
+        return None;
+    }
+    let entries = match &*ls.data.lock().unwrap_or_else(|p| p.into_inner()) {
+        LogsData::Ready { entries, .. } => entries.clone(),
+        _ => return None,
+    };
+    let k = (row - inner_top) as usize;
+    let Some(e) = entries.get(ls.scroll + k) else {
+        return None;
+    };
+    let x = (col as usize)
+        .saturating_sub(rect.x as usize + 1)
+        .saturating_add(ls.xoff);
+    let mut start = 0usize;
+    for i in 0..7 {
+        let w = crate::openrouter::LOG_COLUMNS[i].0;
+        if x >= start && x < start + w {
+            if crate::openrouter::cell_ellipsized(e, i) {
+                let label = crate::openrouter::header_cells()[i].clone();
+                return Some((label, crate::openrouter::full_cell(e, i)));
+            }
+            return None; // landed on a cell that isn't shortened → clears tip
+        }
+        start += w + crate::openrouter::LOG_COL_SEP;
+    }
+    None
+}
+
+/// Fire one background log fetch (unless one is already running) and flip the
+/// `fetching` flag both ways. The shared `data` is replaced atomically, so
+/// scroll / pan positions survive refreshes.
+fn start_logs_fetch(ls: &mut LogsState) {
+    if ls.fetching.load(Ordering::Relaxed) {
+        return;
+    }
+    ls.fetching.store(true, Ordering::Relaxed);
+    let data = Arc::clone(&ls.data);
+    let fetching = Arc::clone(&ls.fetching);
+    std::thread::spawn(move || {
+        let res = crate::openrouter::fetch(50, None);
+        let mut g = data.lock().unwrap_or_else(|p| p.into_inner());
+        *g = match res {
+            Ok(logs) => LogsData::Ready {
+                can_view_private: logs.can_view_private_prompt_logs,
+                entries: logs.entries,
+            },
+            Err(e) => LogsData::Error(e),
+        };
+        fetching.store(false, Ordering::Relaxed);
+    });
+}
+
+/// Spawn the initial fetch and hand back a fresh modal. The fetch reads the
+/// Chrome-session cookie (`dashboard.rs`), so a few hundred ms is typical —
+/// the drawer shows a spinner until `LogsData` flips to Ready. While the
+/// modal stays open it re-fetches every `auto_secs` seconds.
+fn open_logs(cfg: &Config) -> Modal {
+    let auto_secs = cfg.log_refresh_seconds.max(5);
+    let mut ls = LogsState {
+        data: Arc::new(Mutex::new(LogsData::Loading)),
+        scroll: 0,
+        xoff: 0,
+        drag: None,
+        fetching: Arc::new(AtomicBool::new(false)),
+        next_refresh: Instant::now() + Duration::from_secs(auto_secs),
+        auto_secs,
+        tip: None,
+    };
+    start_logs_fetch(&mut ls);
+    Modal::Logs(ls)
+}
+
 
 /// Which section row the settings page has highlighted.
 struct SettingsState {
@@ -165,6 +285,18 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
             snap_at = Instant::now();
             next_refresh = snap_at + refresh;
             last_refresh = fb_clock();
+        }
+        // auto-refresh the OpenRouter request log while its modal is open
+        if let Some(Modal::Logs(ls)) = &mut modal {
+            if Instant::now() >= ls.next_refresh {
+                if ls.fetching.load(Ordering::Relaxed) {
+                    // still fetching → just schedule the next check
+                    ls.next_refresh = Instant::now() + Duration::from_secs(ls.auto_secs);
+                } else {
+                    start_logs_fetch(ls);
+                    ls.next_refresh = Instant::now() + Duration::from_secs(ls.auto_secs);
+                }
+            }
         }
         term.draw(|f| {
             let rect = f.area();
@@ -249,6 +381,61 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                             _ => {}
                         }
                     }
+                    // wheel over the request-log modal scrolls the log
+                    if let Some(Modal::Logs(ls)) = &mut modal {
+                        match m.kind {
+                            // wheel / scroll gestures pan vertically + horizontally
+                            MouseEventKind::ScrollUp => {
+                                ls.tip = None;
+                                ls.scroll = ls.scroll.saturating_sub(3);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                ls.tip = None;
+                                ls.scroll = ls.scroll.saturating_add(3);
+                            }
+                            MouseEventKind::ScrollLeft => {
+                                ls.tip = None;
+                                ls.xoff = ls.xoff.saturating_sub(4);
+                            }
+                            MouseEventKind::ScrollRight => {
+                                ls.tip = None;
+                                ls.xoff = ls.xoff.saturating_add(4).min(1000)
+                            }
+                            // press starts panning and asks the cell under the
+                            // cursor whether it was `..`-shortened (reveal bubble)
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                ls.drag = Some(DragState {
+                                    x0: m.column,
+                                    y0: m.row,
+                                });
+                                let tip = modal_rect
+                                    .map(|r| cell_tip_at(ls, r, m.column, m.row))
+                                    .unwrap_or(None);
+                                if tip.is_some() {
+                                    ls.tip = tip;
+                                } else {
+                                    // clicking something that isn't shortened
+                                    // (row body, non-`..` cell) closes the bubble
+                                    ls.tip = None;
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                ls.tip = None;
+                                if let Some(d) = &mut ls.drag {
+                                    apply_drag_step(
+                                        &mut d.x0,
+                                        &mut d.y0,
+                                        &mut ls.xoff,
+                                        &mut ls.scroll,
+                                        m.column,
+                                        m.row,
+                                    );
+                                }
+                            }
+                            MouseEventKind::Up(_) => ls.drag = None,
+                            _ => {}
+                        }
+                    }
                     // body scrolling + click-to-fold (only on the dashboard)
                     if modal.is_none() {
                         match m.kind {
@@ -266,6 +453,14 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                                         body_rect.width.max(8) as usize,
                                     );
                                     scroll = 0;
+                                } else if let Some(a) =
+                                    body_action_hit(&m, body_rect, scroll, &body)
+                                {
+                                    // clicking an inline action row (e.g. the
+                                    // OpenRouter `logs` line) opens its modal
+                                    match a {
+                                        BodyAction::OrLogs => modal = Some(open_logs(&cfg)),
+                                    }
                                 }
                             }
                             _ => {}
@@ -438,6 +633,27 @@ fn handle_key(
                     _ => {}
                 }
             }
+            Modal::Logs(ls) => {
+                ls.tip = None; // any key dismisses the reveal bubble
+                match k.code {
+                    KeyCode::Char('q') | KeyCode::Esc => *modal = None,
+                    // refresh: refetch in place (scroll/pan positions survive)
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        start_logs_fetch(ls);
+                        ls.next_refresh = Instant::now() + Duration::from_secs(ls.auto_secs);
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => ls.scroll = ls.scroll.saturating_add(1),
+                    KeyCode::Char('k') | KeyCode::Up => ls.scroll = ls.scroll.saturating_sub(1),
+                    KeyCode::PageDown => ls.scroll = ls.scroll.saturating_add(10),
+                    KeyCode::PageUp => ls.scroll = ls.scroll.saturating_sub(10),
+                    // horizontal pan: h/l or ←/→
+                    KeyCode::Char('h') | KeyCode::Left => ls.xoff = ls.xoff.saturating_sub(2),
+                    KeyCode::Char('l') | KeyCode::Right => {
+                        ls.xoff = ls.xoff.saturating_add(2).min(1000)
+                    }
+                    _ => {}
+                }
+            }
         }
         return Ok(false); // swallow keys while a modal is open
     }
@@ -448,6 +664,7 @@ fn handle_key(
             *modal = Some(start_login(LoginKind::Copilot, cfg))
         }
         KeyCode::Char('g') | KeyCode::Char('G') => *modal = Some(start_login(LoginKind::Grok, cfg)),
+        KeyCode::Char('o') | KeyCode::Char('O') => *modal = Some(open_logs(cfg)),
         KeyCode::Char('r') | KeyCode::Char('R') => {
             *next_refresh = Instant::now();
             crate::openrouter::sync_async(cfg); // also refresh the model-usage cache
@@ -738,7 +955,7 @@ fn draw_dashboard(
         ),
         Span::raw(" ".repeat(chunks[0].width.saturating_sub(8 + 28) as usize)),
         Span::styled(
-            " 1-0 fold · ? settings · j/k/wheel scroll",
+            " 1-0 fold · ? settings · o logs · j/k/wheel scroll",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -919,6 +1136,27 @@ fn body_fold_hit(
     body.section_at(line_idx)
 }
 
+/// Which extra action a left-click landed on in the body (any column of an
+/// action row). Fold-marker clicks keep priority via `body_fold_hit`.
+fn body_action_hit(
+    m: &crossterm::event::MouseEvent,
+    body_rect: Rect,
+    scroll: usize,
+    body: &BodyLines,
+) -> Option<BodyAction> {
+    if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) || body_rect.height == 0 {
+        return None;
+    }
+    if m.column < body_rect.x || m.column >= body_rect.x + body_rect.width {
+        return None;
+    }
+    if m.row < body_rect.y || m.row >= body_rect.y + body_rect.height {
+        return None;
+    }
+    let line_idx = scroll + (m.row - body_rect.y) as usize;
+    body.actions.get(line_idx).copied().flatten()
+}
+
 /// Find which provider row a click landed on in the connect menu.
 /// Item rows are laid out at modal.y + 3 + i (title + blank line above).
 fn menu_hit(m: &crossterm::event::MouseEvent, mrect: Rect, n: usize) -> Option<usize> {
@@ -979,6 +1217,7 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &mut Modal, keymap: &Keymap) -> 
         Modal::Menu(menu) => draw_connect_menu(f, area, menu),
         Modal::Login(ls) => draw_login_modal(f, area, ls),
         Modal::Settings(st) => draw_settings_modal(f, area, st, keymap),
+        Modal::Logs(ls) => draw_logs_modal(f, area, ls),
     }
 }
 
@@ -1227,6 +1466,268 @@ fn draw_login_modal(f: &mut Frame, area: Rect, ls: &LoginState) -> Option<Rect> 
     Some(rect)
 }
 
+/// `o` logs modal: recent OpenRouter requests (newest first), scrollable.
+/// Shows a spinner while the Chrome-session fetch is in flight, then the
+/// rows with time / model / provider / tokens / cost / finish.
+fn draw_logs_modal(f: &mut Frame, area: Rect, ls: &mut LogsState) -> Option<Rect> {
+    let (entries, status, status_color): (Vec<crate::model::OrLogEntry>, String, Color) = {
+        let g = ls.data.lock().unwrap_or_else(|p| p.into_inner());
+        match &*g {
+            LogsData::Loading => (
+                Vec::new(),
+                "⟳ loading from OpenRouter…".to_string(),
+                Color::DarkGray,
+            ),
+            LogsData::Error(e) => (
+                Vec::new(),
+                format!("fetch failed ({e})"),
+                Color::Red,
+            ),
+            LogsData::Ready {
+                can_view_private,
+                entries,
+            } => {
+                let prompt = if *can_view_private {
+                    "prompt logs on"
+                } else {
+                    "prompt logs off"
+                };
+                (
+                    entries.clone(),
+                    format!("{} requests · {}", entries.len(), prompt),
+                    Color::DarkGray,
+                )
+            }
+        }
+    };
+
+    // deterministic sizing: width = exactly the table (+ borders + breathing
+    // room), height = a fixed visible row count — a big terminal doesn't turn
+    // it into a full-pane modal, a small one just gets fewer rows
+    const LOG_MAX_ROWS: usize = 12;
+    let table_w = crate::openrouter::log_table_width();
+    // `.min(max(40, …))` instead of `.clamp`: on a very narrow pane the upper
+    // bound can be < 40 and `.clamp` would panic (min > max)
+    let width = ((table_w + 4) as u16).min(area.width.saturating_sub(2).max(40));
+    let want_h = ((LOG_MAX_ROWS + 7) as u16)
+        .min(area.height.saturating_sub(2))
+        .max(8);
+    let rect = rect_centered(area, width, want_h);
+    let inner_w = (rect.width as usize).saturating_sub(2);
+    // header + summary + status + blank + borders
+    let rows_cap = (rect.height as usize).saturating_sub(7).max(1);
+
+    f.render_widget(Clear, rect);
+    let mut lines: Vec<Line> = Vec::new();
+    // column header, aligned to the same fixed widths as the data rows
+    lines.push(logs_line(
+        &crate::openrouter::header_cells(),
+        &[
+            Color::DarkGray,
+            Color::Cyan,
+            Color::DarkGray,
+            Color::DarkGray,
+            Color::DarkGray,
+            Color::DarkGray,
+            Color::DarkGray,
+        ],
+        ls.xoff,
+        inner_w,
+    ));
+
+    if entries.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("   {status}"),
+            Style::default().fg(status_color),
+        )]));
+    } else {
+        if ls.scroll + rows_cap > entries.len() {
+            ls.scroll = entries.len().saturating_sub(rows_cap);
+        }
+        for e in entries.iter().skip(ls.scroll).take(rows_cap) {
+            lines.push(logs_line(
+                &crate::openrouter::row_cells(e),
+                &[
+                    Color::DarkGray,
+                    Color::Cyan,
+                    Color::White,
+                    Color::White,
+                    Color::White,
+                    Color::White,
+                    Color::White,
+                ],
+                ls.xoff,
+                inner_w,
+            ));
+        }
+        // aggregate footer: total tokens, avg tps, avg cache, total cost
+        lines.push(Line::raw(""));
+        lines.push(logs_line(
+            &crate::openrouter::summary_cells(&entries),
+            &[
+                Color::DarkGray,
+                Color::Yellow,
+                Color::DarkGray,
+                Color::Green,
+                Color::Green,
+                Color::Green,
+                Color::Green,
+            ],
+            ls.xoff,
+            inner_w,
+        ));
+    }
+
+    let foot = if entries.is_empty() {
+        String::new()
+    } else if ls.scroll + rows_cap >= entries.len() {
+        "esc/q close".to_string()
+    } else {
+        format!("{}/{} · esc/q close", ls.scroll + rows_cap, entries.len())
+    };
+    let fetching = if ls.fetching.load(Ordering::Relaxed) {
+        " ⟳".to_string()
+    } else {
+        String::new()
+    };
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{status}{fetching} · auto {}s", ls.auto_secs),
+            Style::default().fg(status_color),
+        ),
+        Span::styled(
+            "    j/k scroll · ←/→ pan · ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        // R = refresh stands out (yellow), and drag/pan still work even
+        // though only the ←/→ keys are advertised
+        Span::styled(
+            "R refresh",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {foot}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" OpenRouter — recent requests ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .style(Style::default().fg(Color::White)),
+        rect,
+    );
+
+    // click-to-reveal bubble for a `..`-shortened cell, drawn just under the
+    // modal so it never overlaps the table
+    if let Some((label, value)) = &ls.tip {
+        let text = format!("  {label}: {value}  ");
+        let bw = (text.chars().count() as u16 + 2)
+            .min(area.width.saturating_sub(2))
+            .max(24);
+        let by = (rect.y + rect.height).min(area.y + area.height.saturating_sub(3));
+        let bx = (rect.x + 1).min(area.x + area.width.saturating_sub(bw));
+        let br = Rect::new(bx, by, bw, 3);
+        // clear anything the dashboard shows under the bubble
+        f.render_widget(Clear, br);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {value} "),
+                Style::default().fg(Color::Yellow),
+            )))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {label} "))
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .style(Style::default().fg(Color::White)),
+            br,
+        );
+    }
+
+    Some(rect)
+}
+
+/// Render one fixed-layout log-table row (header / data / summary cells) with
+/// per-column colors, panned horizontally by `xoff`. Every call pads to the
+/// same `LOG_COLUMNS` widths, so headers, rows and the aggregate footer always
+/// line up — also while panning.
+fn logs_line(cells: &[String; 7], colors: &[Color; 7], xoff: usize, w: usize) -> Line<'static> {
+    let mut segs: Vec<(String, Color)> = Vec::with_capacity(13);
+    for (i, c) in cells.iter().enumerate() {
+        if i > 0 {
+            segs.push((" ".repeat(crate::openrouter::LOG_COL_SEP), Color::DarkGray));
+        }
+        segs.push((
+            crate::openrouter::fit_cell(c, crate::openrouter::LOG_COLUMNS[i]),
+            colors[i],
+        ));
+    }
+    slice_row(&segs, xoff, w)
+}
+
+/// Slice pre-colored `(text, color)` segments to a `[skip, skip+width)`
+/// character window, preserving each segment's color. Used so log rows can
+/// be panned horizontally without losing columns.
+fn slice_row(segs: &[(String, Color)], skip: usize, width: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut skip = skip;
+    let mut taken = 0usize;
+    for (text, color) in segs {
+        if taken >= width {
+            break;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        if skip >= chars.len() {
+            skip -= chars.len();
+            continue;
+        }
+        let visible = &chars[skip..];
+        let take = visible.len().min(width - taken);
+        let piece: String = visible[..take].iter().collect();
+        if !piece.is_empty() {
+            out.push(Span::styled(piece, Style::default().fg(*color)));
+        }
+        taken += take;
+        skip = 0;
+    }
+    Line::from(out)
+}
+
+/// One drag step for panning the log view. Whichever axis the pointer moved
+/// along more wins; a delta of `STEP` cells = one scroll step. The consumed
+/// origin is updated so continuous drags keep moving.
+fn apply_drag_step(
+    x0: &mut u16,
+    y0: &mut u16,
+    xoff: &mut usize,
+    scroll: &mut usize,
+    col: u16,
+    row: u16,
+) {
+    const STEP: i64 = 4;
+    let dx = col as i64 - *x0 as i64;
+    let dy = row as i64 - *y0 as i64;
+    if dx.abs() > dy.abs() {
+        let steps = dx / STEP;
+        if steps != 0 {
+            *xoff = (*xoff as i64 + steps).clamp(0, 1000) as usize;
+            *x0 = col;
+        }
+    } else if (dy / STEP) != 0 {
+        let steps = dy / STEP;
+        *scroll = (*scroll as i64 + steps).max(0) as usize;
+        *y0 = row;
+    }
+}
+
 /// Accumulates the dashboard body as a list of lines so the renderer can
 /// scroll/clip them to the viewport instead of silently dropping content.
 /// Dashboard sections that can be collapsed/expanded. The key shown left of
@@ -1458,7 +1959,16 @@ impl CollapseState {
 struct BodyLines {
     lines: Vec<Line<'static>>,
     sections: Vec<Option<Section>>,
+    /// optional click action attached to a line (e.g. open the request log)
+    actions: Vec<Option<BodyAction>>,
     drew: bool,
+}
+
+/// A body row the user can click to trigger something extra.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BodyAction {
+    /// open the OpenRouter request-log modal
+    OrLogs,
 }
 
 impl BodyLines {
@@ -1466,6 +1976,7 @@ impl BodyLines {
         Self {
             lines: Vec::new(),
             sections: Vec::new(),
+            actions: Vec::new(),
             drew: false,
         }
     }
@@ -1473,11 +1984,20 @@ impl BodyLines {
         self.drew = true;
         self.lines.push(line);
         self.sections.push(None);
+        self.actions.push(None);
     }
     fn push_section(&mut self, s: Section, line: Line<'static>) {
         self.drew = true;
         self.lines.push(line);
         self.sections.push(Some(s));
+        self.actions.push(None);
+    }
+    /// A row that opens the given action when clicked anywhere on the line.
+    fn action(&mut self, a: BodyAction, line: Line<'static>) {
+        self.drew = true;
+        self.lines.push(line);
+        self.sections.push(None);
+        self.actions.push(Some(a));
     }
     /// separator between provider sections — only when something preceded it
     fn divider(&mut self, width: usize) {
@@ -2108,6 +2628,23 @@ fn build_body(
                                         false,
                                     );
                                 }
+                                // request-log shortcut: click the row (or press `o`)
+                                // to open the recent OpenRouter requests
+                                body.action(
+                                    BodyAction::OrLogs,
+                                    Line::from(vec![
+                                        Span::styled(
+                                            "  logs ",
+                                            Style::default()
+                                                .fg(Color::Cyan)
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            "recent requests · click to open",
+                                            Style::default().fg(Color::DarkGray),
+                                        ),
+                                    ]),
+                                );
                             }
                         }
                     }
@@ -2449,6 +2986,152 @@ mod tests {
             panic!()
         };
         assert_eq!(ls.input, key);
+    }
+
+    #[test]
+    fn o_key_opens_openrouter_logs_and_q_closes() {
+        let cfg = crate::config::load();
+        let mut modal: Option<Modal> = None;
+        let mut next = Instant::now();
+        let snap = Snapshot::default();
+        let mut scroll = 0usize;
+        let mut folded = CollapseState::default();
+        // 'o' on the dashboard opens the request-log modal
+        handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        assert!(matches!(modal, Some(Modal::Logs(_))));
+        // upward scroll keys don't underflow
+        handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        if let Some(Modal::Logs(ls)) = &modal {
+            assert_eq!(ls.scroll, 0);
+        }
+        // horizontal pan keys move xoff and clamp at 0
+        handle_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        if let Some(Modal::Logs(ls)) = &modal {
+            assert_eq!(ls.xoff, 4);
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .unwrap();
+        if let Some(Modal::Logs(ls)) = &modal {
+            assert_eq!(ls.xoff, 0);
+        }
+        // 'q' closes it back to the dashboard
+        assert!(handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+            &mut modal,
+            &mut next,
+            &cfg,
+            &snap,
+            &mut scroll,
+            &mut folded,
+            &mut Keymap::default(),
+        )
+        .is_ok());
+        assert!(modal.is_none());
+    }
+
+    #[test]
+    fn openrouter_section_has_clickable_logs_row() {
+        // a connected-but-empty OpenRouter section still exposes the logs row
+        let mut snap = Snapshot::default();
+        snap.openrouter.needs_key = false;
+        let cfg = crate::config::load();
+        let body = build_body(
+            &cfg,
+            &snap,
+            CollapseState::default(),
+            Keymap::default(),
+            120,
+        );
+
+        let idx = body
+            .actions
+            .iter()
+            .position(|a| matches!(a, Some(BodyAction::OrLogs)))
+            .expect("expected a clickable OpenRouter logs row");
+        let text: String = body.lines[idx]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("logs") && text.contains("recent requests"));
+
+        // clicking anywhere on that row (inside the pane) returns the action
+        let rect = Rect::new(0, 2, 120, 30);
+        let row = rect.y + idx as u16;
+        assert_eq!(
+            body_action_hit(&click(10, row), rect, 0, &body),
+            Some(BodyAction::OrLogs)
+        );
+        // row-mapped via scroll offset too
+        assert_eq!(
+            body_action_hit(&click(4, row), rect, 0, &body),
+            Some(BodyAction::OrLogs)
+        );
+        // a click on a plain row (or outside the pane) stays a no-op
+        let plain = body_action_hit(&click(10, rect.y + 1), rect, 0, &body);
+        assert!(!matches!(plain, Some(BodyAction::OrLogs)));
+        assert!(body_action_hit(&click(10, rect.y + rect.height), rect, 0, &body).is_none());
     }
 
     #[test]
@@ -2823,6 +3506,7 @@ mod tests {
             .collect();
         assert!(txt.trim_end().ends_with("▼ 1 more"), "got: {txt:?}");
 
+
         // scrolling down clamps and shows both indicators
         let mut scroll = 9usize;
         term.draw(|f| draw_body(f, f.area(), &body, &mut scroll))
@@ -3026,5 +3710,96 @@ mod tests {
             decide_mouse(&click(20, 20), None, None, &footer),
             MouseDecision::Refresh
         );
+    }
+
+    #[test]
+    fn slice_row_pans_any_window() {
+        let segs = [
+            ("12:00:00  ".to_string(), Color::DarkGray),
+            ("deepseek-v4-flash".to_string(), Color::Cyan),
+            (
+                "  GMICloud  48.8k tok  c47%  $0.0038  stop · pi · streamed".to_string(),
+                Color::White,
+            ),
+        ];
+        let full: Vec<char> = segs.iter().flat_map(|(s, _)| s.chars()).collect();
+        for skip in [0usize, 1, 9, 10, 11, 17, 30, 60, 61, full.len(), full.len() + 5] {
+            for width in [1usize, 4, 20, 60, 120] {
+                let l = slice_row(&segs, skip, width);
+                let out: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                let expect: String = full.iter().skip(skip).take(width).collect();
+                assert_eq!(out, expect, "skip={skip} width={width}");
+            }
+        }
+        // colors survive the window slice
+        let l = slice_row(&segs, 0, 200);
+        assert_eq!(l.spans.len(), 3);
+        assert_eq!(l.spans[0].style.fg, Some(Color::DarkGray));
+        assert_eq!(l.spans[1].style.fg, Some(Color::Cyan));
+        // past the end → empty row (blank while over-scrolled right)
+        assert!(slice_row(&segs, 200, 20).spans.is_empty());
+    }
+
+    #[test]
+    fn clicking_ellipsized_cell_reveals_full_value() {
+        use crate::model::OrLogEntry;
+        let e = OrLogEntry {
+            model: "somevendor/a-very-long-model-name-20260101".into(),
+            provider: "GMICloud".into(),
+            ..Default::default()
+        };
+        let data = Arc::new(Mutex::new(LogsData::Ready {
+            can_view_private: true,
+            entries: vec![e],
+        }));
+        let ls = LogsState {
+            data,
+            scroll: 0,
+            xoff: 0,
+            drag: None,
+            fetching: Arc::new(AtomicBool::new(false)),
+            next_refresh: Instant::now(),
+            auto_secs: 10,
+            tip: None,
+        };
+        let rect = Rect::new(0, 0, 80, 20);
+        // provider column (col index 2): inner x = col_start(28) + 1(border)
+        let tip = cell_tip_at(&ls, rect, 29, 2).expect("provider cell");
+        assert_eq!(tip.0, "provider");
+        assert_eq!(tip.1, "GMICloud");
+        // model column (col index 1): inner x = col_start(9) + 1
+        let tip = cell_tip_at(&ls, rect, 10, 2).expect("model cell");
+        assert_eq!(tip.0, "model");
+        assert_eq!(tip.1, "somevendor/a-very-long-model-name-20260101");
+        // a click on a non-ellipsized cell (time) clears instead of revealing
+        assert!(cell_tip_at(&ls, rect, 1, 2).is_none());
+        // clicks on the border or header rows never trigger it
+        assert!(cell_tip_at(&ls, rect, 29, 0).is_none());
+        assert!(cell_tip_at(&ls, rect, 29, 1).is_none());
+        // horizontal pan shifts hit-testing: provider revealed at inner x 24
+        let mut panned = ls;
+        panned.xoff = 4;
+        let tip = cell_tip_at(&panned, rect, 25, 2).expect("panned provider cell");
+        assert_eq!(tip.1, "GMICloud");
+    }
+
+    #[test]
+    fn drag_step_pans_dominant_axis() {
+        let mut xoff = 0usize;
+        let mut scroll = 0usize;
+        let (mut x0, mut y0) = (10u16, 5u16);
+        // horizontal drag: 8 cells right = 2 steps of 4 → xoff 2, scroll unchanged
+        apply_drag_step(&mut x0, &mut y0, &mut xoff, &mut scroll, 18, 5);
+        assert_eq!(xoff, 2);
+        assert_eq!(scroll, 0);
+        assert_eq!(x0, 18); // origin advanced
+        // vertical drag downward: 8 cells = 2 steps → scroll 2, xoff unchanged
+        apply_drag_step(&mut x0, &mut y0, &mut xoff, &mut scroll, 18, 13);
+        assert_eq!(scroll, 2);
+        assert_eq!(xoff, 2);
+        // sub-step deltas do nothing (below the 4-cell step)
+        let before = scroll;
+        apply_drag_step(&mut x0, &mut y0, &mut xoff, &mut scroll, 20, 14); // dx2 dy1
+        assert_eq!(scroll, before);
     }
 }

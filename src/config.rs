@@ -9,6 +9,9 @@ pub struct Config {
     pub opencode_budget: u64,
     pub reset_hour: u32,
     pub refresh_seconds: u64,
+    /// seconds between automatic refreshes of the OpenRouter request-log view
+    /// (default 10, min 5)
+    pub log_refresh_seconds: u64,
     /// also show providers that are not connected / have no usage this window
     pub show_no_data_providers: bool,
     pub prices: Prices,
@@ -68,6 +71,7 @@ pub fn load() -> Config {
         opencode_budget: 10_000_000,
         reset_hour: 0,
         refresh_seconds: 30,
+        log_refresh_seconds: 10,
         show_no_data_providers: false,
         prices: Prices::default(),
         secrets_dir: secrets_dir(),
@@ -96,6 +100,9 @@ pub fn load() -> Config {
                 }
                 if let Some(n) = v.get("refresh_seconds").and_then(|x| x.as_u64()) {
                     cfg.refresh_seconds = n.max(5);
+                }
+                if let Some(n) = v.get("log_refresh_seconds").and_then(|x| x.as_u64()) {
+                    cfg.log_refresh_seconds = n.max(5);
                 }
                 if let Some(b) = v.get("show_no_data_providers").and_then(|x| x.as_bool()) {
                     cfg.show_no_data_providers = b;

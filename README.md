@@ -67,6 +67,8 @@ ub login opencode           # paste an OpenCode Go key (sk-...)
 ub logout                   # clear ALL saved tokens/keys
 ub logout opencode          # clear one provider only (copilot|openrouter|opencode|grok|all)
 ub sync-openrouter          # refresh the per-model usage cache from the web dashboard
+ub logs [limit]             # recent OpenRouter requests, newest first (default 25)
+ub logs --json [limit]      # same, as JSON
 ```
 
 `sync-openrouter` pulls your openrouter.ai login from **Chrome** to query the
@@ -79,6 +81,24 @@ supported yet (the sync reports a clear error). On platforms without the
 Chrome-cookie pull (Linux, and headless environments) the per-model breakdown
 is omitted and usage falls back to the public-API credits / key / windowed-
 spend view — the provider still works, just without per-model detail.
+
+`ub logs` uses the same Chrome-session access to read the **recent request
+log** from the web dashboard's `user-transactions` endpoint (the rows the
+`openrouter.ai/logs` page shows), printing one line per request: time · model
+(vendor + build date trimmed) · provider (collapsed to 6 chars) · tokens ·
+generation **tps** · prompt-cache hit % · cost. TPS uses OpenRouter's own
+definition: completion tokens over the generation duration (`+ latency` when
+not streamed). A request served entirely from OpenRouter's response cache shows
+`c-hit`; otherwise `cNN%` is the prompt-cache (KV read) hit rate. (Prompt/response
+bodies are not included — they need the extra `can_view_private_prompt_logs`
+permission.) Inside the TUI the OpenRouter section shows a `logs` row — click
+it (or press `o`) for the same list, with `j`/`k`/wheel to scroll, `←`/`→` or
+drag to pan columns, and `R` to refetch. Headers, rows and a `Σ` aggregate
+footer (total tokens, avg tps, avg cache %, total cost) are rendered in one
+fixed column layout, so they stay aligned while panning. The log **auto-refreshes**
+while the modal is open: default every 10s, tunable with `log_refresh_seconds`
+(5s minimum). Like the dashboard sync, it needs an active openrouter.ai login
+in Chrome and is limited to macOS/Windows there.
 
 ### JSON output
 
@@ -94,6 +114,7 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 | `c`              | open the Connect menu (login / logout)  |
 | `l`              | start Copilot login                     |
 | `g`              | show Grok login instructions            |
+| `o`              | open the OpenRouter request-log view    |
 | `r`              | refresh now (+ resync OpenRouter cache) |
 | `1`–`0`          | fold/unfold the section bound to that digit |
 | `?`              | settings — assign fold digits to sections  |
@@ -144,6 +165,7 @@ saved explicitly. Saved key priority: env → keyring → auto-detection.
   "opencode_daily_budget_tokens": 10000000,
   "reset_hour": 0,
   "refresh_seconds": 30,
+  "log_refresh_seconds": 10,
   "show_no_data_providers": false,
   "prices": {
     "input": 3.0,

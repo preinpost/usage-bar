@@ -340,6 +340,19 @@ struct OrCookie {
     value: String,
 }
 
+/// Cookie header for authenticated OpenRouter web-dashboard API calls.
+pub fn cookie_header() -> Result<String, String> {
+    let cookies = chrome_openrouter_cookies()?;
+    if cookies.is_empty() {
+        return Err("no openrouter.ai cookies in Chrome — log in at openrouter.ai first".into());
+    }
+    Ok(cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; "))
+}
+
 /// Read + decrypt every openrouter.ai cookie from the user's Chrome profile.
 fn chrome_openrouter_cookies() -> Result<Vec<OrCookie>, String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -452,15 +465,7 @@ fn parse_usage(resp: &Value) -> Value {
 
 /// Full sync: Chrome cookies → analytics-query (today + month) → cache file.
 pub fn sync_now(_cfg: &Config) -> Result<String, String> {
-    let cookies = chrome_openrouter_cookies()?;
-    if cookies.is_empty() {
-        return Err("no openrouter.ai cookies in Chrome — log in at openrouter.ai first".into());
-    }
-    let header = cookies
-        .iter()
-        .map(|c| format!("{}={}", c.name, c.value))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let header = cookie_header()?;
 
     // time window: local midnight → now, and the same 30 days back
     let local_now = chrono::Local::now();
