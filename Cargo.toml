@@ -1,6 +1,6 @@
 [package]
 name = "usage-bar"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 # installed/invoked as `ub`; package & crate keep the `usage-bar` name
