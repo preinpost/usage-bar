@@ -1,5 +1,7 @@
 # usage-bar
 
+<img width="604" height="805" alt="스크린샷 2026-08-20 14 31 30" src="https://github.com/user-attachments/assets/342d97e7-e2d5-4536-8c0e-42040e6fee66" />
+
 A terminal usage dashboard for AI coding agents. Shows daily token/cost budgets
 and provider quotas at a glance, both as a live TUI and as one-shot text/JSON
 output for scripts. Originally built as the core of a Herdr plugin panel — it
@@ -99,6 +101,8 @@ fixed column layout, so they stay aligned while panning. The log **auto-refreshe
 while the modal is open: default every 10s, tunable with `log_refresh_seconds`
 (5s minimum). Like the dashboard sync, it needs an active openrouter.ai login
 in Chrome and is limited to macOS/Windows there.
+
+<img width="597" height="549" alt="스크린샷 2026-08-20 14 32 04" src="https://github.com/user-attachments/assets/ff15ab22-357f-49ea-bd28-7371612fde91" />
 
 ### JSON output
 
