@@ -210,7 +210,7 @@ pub const LOG_COLUMNS: [(usize, bool); 7] = [
     (8, false),   // time      HH:MM:SS
     (18, false),  // model     deepseek-v4-flash fits
     (8, false),   // provider  GMIC..
-    (10, true),   // tokens    327.2k tok (sums fit)
+    (12, true),   // in/out    1.5k/250, 123.5k/98.8k fits
     (6, true),    // tps       96.4/s
     (5, true),    // cache     c100% / c-hit
     (8, true),    // cost      $0.0038
@@ -266,7 +266,7 @@ pub fn header_cells() -> [String; 7] {
         "time".into(),
         "model".into(),
         "provider".into(),
-        "tokens".into(),
+        "in/out".into(),
         "tps".into(),
         "cache".into(),
         "cost".into(),
@@ -285,12 +285,13 @@ fn time_str(e: &OrLogEntry) -> String {
 
 /// Per-request row cells.
 pub fn row_cells(e: &OrLogEntry) -> [String; 7] {
-    let toks = e.tokens_prompt + e.tokens_completion + e.tokens_cached;
+    let inp = crate::model::fmt_compact(e.tokens_prompt);
+    let outp = crate::model::fmt_compact(e.tokens_completion);
     [
         time_str(e),
         short_model(&e.model, 18),
         short_provider(&e.provider),
-        format!("{} tok", crate::model::fmt_compact(toks)),
+        format!("{inp}/{outp}"),
         fmt_tps(tps(e)),
         cache_label(e),
         if e.cost > 0.0 {
@@ -329,7 +330,13 @@ pub fn full_cell(e: &OrLogEntry, i: usize) -> String {
         0 => time_str(e),
         1 => e.model.clone(), // full slug incl. vendor + build date
         2 => e.provider.clone(),
-        3 => format!("{} tok total", crate::model::fmt_int(toks)),
+        3 => format!(
+            "in {} · out {} · cached {} (total {})",
+            crate::model::fmt_int(e.tokens_prompt),
+            crate::model::fmt_int(e.tokens_completion),
+            crate::model::fmt_int(e.tokens_cached),
+            crate::model::fmt_int(toks),
+        ),
         4 => format!("{:.2} tok/s", tps(e)),
         5 => match cache_pct(e) {
             Some(p) => format!("prompt cache {}%", p),
@@ -435,7 +442,7 @@ mod tests {
         assert!(!l.contains("vendor/"));
         assert!(l.contains("Some..")); // provider >6 chars collapsed
         assert!(l.contains("$0.0012"));
-        assert!(l.contains("2.8k tok")); // 1500+250+1000 = 2750 → 2.8k
+        assert!(l.contains("1.5k/250")); // 1500 in / 250 out
         assert!(l.contains("c36%")); // 1000/2750 ≈ 36%
         assert!(l.contains("50.0/s")); // 250 completion / 5s = 50 tok/s
         // finish/app columns were dropped
@@ -540,14 +547,14 @@ mod tests {
         assert_eq!(col_of(&header, 0), "time");
         assert_eq!(col_of(&header, 1), "model");
         assert_eq!(col_of(&header, 2), "provider");
-        assert_eq!(col_of(&header, 3), "tokens");
+        assert_eq!(col_of(&header, 3), "in/out");
         assert_eq!(col_of(&header, 4), "tps");
         assert_eq!(col_of(&header, 5), "cache");
         assert_eq!(col_of(&header, 6), "cost");
         // data fills the same slots (right-aligned numerics)
         assert_eq!(col_of(&row, 1), "model-name-abc");
         assert_eq!(col_of(&row, 2), "Some..");
-        assert_eq!(col_of(&row, 3), "2.8k tok");
+        assert_eq!(col_of(&row, 3), "1.5k/250"); // 1500 prompt / 250 completion
         assert_eq!(col_of(&row, 4), "50.0/s");
         assert_eq!(col_of(&row, 5), "c36%");
         assert_eq!(col_of(&row, 6), "$0.0012");
