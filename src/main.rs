@@ -4,7 +4,7 @@
 //!   watch (default)  full TUI dashboard
 //!   status           one-shot text summary to stdout (for actions/scripts)
 //!   login copilot    headless device flow (prints code, polls, saves token)
-//!   login grok       instructions
+//!   login grok       device flow (browser + code, saves token)
 //!   logout           clear saved plugin tokens
 //!   --json           JSON snapshot (with status or watch --once)
 
@@ -72,9 +72,11 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 "grok" | "xai" => {
-                    println!("▶ Grok login");
-                    println!("  1) Install the Grok Build CLI and run:  grok login");
-                    println!("  2) Or set GROK_OAUTH_TOKEN=<bearer> for the panel process.");
+                    println!("▶ Grok device login");
+                    println!("  Open the link below in a browser, enter the code, then wait.");
+                    providers::grok::device_login(&cfg, |line| println!("{line}"));
+                    let snap = snapshot::snapshot(&cfg);
+                    print!("{}", snapshot::summarize(&snap, &cfg));
                     ExitCode::SUCCESS
                 }
                 "opencode" | "opencode-go" => {
@@ -132,7 +134,8 @@ fn main() -> ExitCode {
                     providers::copilot::clear_token(&cfg);
                     openrouter::clear_key(&cfg);
                     providers::opencode_go::clear_key(&cfg);
-                    println!("✓ cleared all saved OAuth/API tokens (~/.grok/auth.json untouched)");
+                    providers::grok::clear_token(&cfg);
+                    println!("✓ cleared all saved OAuth/API tokens");
                 }
                 "copilot" | "github" => {
                     providers::copilot::clear_token(&cfg);
@@ -147,9 +150,8 @@ fn main() -> ExitCode {
                     println!("✓ cleared saved OpenCode Go API key (auto-detection still applies)");
                 }
                 "grok" | "xai" => {
-                    println!(
-                        "Grok keeps no token in this app — credentials live in ~/.grok/auth.json and are removed separately."
-                    );
+                    providers::grok::clear_token(&cfg);
+                    println!("✓ cleared the saved Grok OAuth token (~/.grok/auth.json untouched)");
                 }
                 other => {
                     eprintln!(
@@ -216,7 +218,7 @@ fn print_usage() {
     println!("  ub status --json                JSON snapshot");
     println!("  ub watch --json                 JSON snapshot via watch mode");
     println!("  ub login copilot                GitHub Copilot device-flow login");
-    println!("  ub login grok                   show Grok login instructions");
+    println!("  ub login grok                   device flow (browser + code)");
     println!("  ub login openrouter             paste an OpenRouter API key");
     println!("  ub login opencode               paste an OpenCode Go API key");
     println!(
@@ -230,7 +232,9 @@ fn print_usage() {
     println!("  -h, --help                       show this help");
     println!("  --json                           JSON output (with status / watch)");
     println!();
-    println!("TUI KEYS: q/x/Esc quit · c Connect menu · l Copilot login · g Grok login · o OpenRouter logs · r refresh");
+    println!(
+        "TUI KEYS: q/x/Esc quit · c Connect menu · l Copilot login · g Grok login · o OpenRouter logs · r refresh"
+    );
 }
 
 fn print_json(snap: &model::Snapshot) {

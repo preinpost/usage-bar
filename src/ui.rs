@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 use crate::config::Config;
 use crate::model::{Snapshot, Status, fmt_money, fmt_tok};
 use crate::providers::copilot;
+use crate::providers::grok;
 use crate::snapshot;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -207,7 +208,6 @@ fn open_logs(cfg: &Config) -> Modal {
     start_logs_fetch(&mut ls);
     Modal::Logs(ls)
 }
-
 
 /// Which section row the settings page has highlighted.
 struct SettingsState {
@@ -760,19 +760,7 @@ fn open_menu(snap: &Snapshot) -> Modal {
 fn start_login(kind: LoginKind, cfg: &Config) -> Modal {
     match kind {
         LoginKind::Copilot => Modal::Login(start_copilot_login(cfg)),
-        LoginKind::Grok => Modal::Login(LoginState {
-            kind: LoginKind::Grok,
-            lines: Arc::new(Mutex::new(vec![
-                "1) Install the Grok Build CLI and run:   grok login".into(),
-                "2) Or set GROK_OAUTH_TOKEN=<bearer> for the panel process.".into(),
-                "".into(),
-                "press q or Esc to return to the dashboard".into(),
-            ])),
-            done: Arc::new(AtomicBool::new(false)),
-            connected: Arc::new(AtomicBool::new(false)),
-            connected_at: None,
-            input: String::new(),
-        }),
+        LoginKind::Grok => Modal::Login(start_grok_login(cfg)),
         LoginKind::OpenRouter => Modal::Login(LoginState {
             kind: LoginKind::OpenRouter,
             lines: Arc::new(Mutex::new(vec![
@@ -829,6 +817,35 @@ fn start_copilot_login(cfg: &Config) -> LoginState {
     });
     LoginState {
         kind: LoginKind::Copilot,
+        lines,
+        done,
+        connected,
+        connected_at: None,
+        input: String::new(),
+    }
+}
+
+fn start_grok_login(cfg: &Config) -> LoginState {
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let connected = Arc::new(AtomicBool::new(false));
+    let l2 = lines.clone();
+    let d2 = done.clone();
+    let c2 = connected.clone();
+    let cfg2 = cfg.clone();
+    std::thread::spawn(move || {
+        let ok = grok::device_login(&cfg2, |line| {
+            if let Ok(mut l) = l2.lock() {
+                l.push(line.to_string());
+            }
+        });
+        if ok.is_some() {
+            c2.store(true, Ordering::Relaxed);
+        }
+        d2.store(true, Ordering::Relaxed);
+    });
+    LoginState {
+        kind: LoginKind::Grok,
         lines,
         done,
         connected,
@@ -1478,11 +1495,7 @@ fn draw_logs_modal(f: &mut Frame, area: Rect, ls: &mut LogsState) -> Option<Rect
                 "⟳ loading from OpenRouter…".to_string(),
                 Color::DarkGray,
             ),
-            LogsData::Error(e) => (
-                Vec::new(),
-                format!("fetch failed ({e})"),
-                Color::Red,
-            ),
+            LogsData::Error(e) => (Vec::new(), format!("fetch failed ({e})"), Color::Red),
             LogsData::Ready {
                 can_view_private,
                 entries,
@@ -1604,12 +1617,11 @@ fn draw_logs_modal(f: &mut Frame, area: Rect, ls: &mut LogsState) -> Option<Rect
         // though only the ←/→ keys are advertised
         Span::styled(
             "R refresh",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" · {foot}"),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!(" · {foot}"), Style::default().fg(Color::DarkGray)),
     ]));
 
     f.render_widget(
@@ -2463,7 +2475,7 @@ fn build_body(
                     // divider, so a status with no displayable line can't leave a stray bar
                     let line: Option<Line<'static>> = if snap.grok.needs_login {
                         Some(Line::from(Span::styled(
-                            "Grok — needs 'grok login' or GROK_OAUTH_TOKEN",
+                            "Grok — needs device login (press g) or GROK_OAUTH_TOKEN",
                             Style::default().fg(Color::DarkGray),
                         )))
                     } else if let Some(e) = &snap.grok.error {
@@ -2477,8 +2489,8 @@ fn build_body(
                             Section::Grok,
                             keymap.key_of(Section::Grok),
                             open,
-                            &format!("credits {p:.0}% used · resets {resets}"),
-                            "",
+                            "credits",
+                            &format!("{p:.0}% used · resets {resets}"),
                             width,
                         ))
                     } else {
@@ -2489,6 +2501,19 @@ fn build_body(
                             body.divider(width);
                         }
                         body.push(l.clone());
+                    }
+                    if open && line.is_some() {
+                        // Credits usage bar (how much of the plan is spent).
+                        if let Some(p) = snap.grok.used_pct {
+                            let frac = (p / 100.0).clamp(0.0, 1.0);
+                            let resets = snap.grok.resets_at.as_deref().unwrap_or("—");
+                            let right = format!("{p:.0}% · resets {resets}");
+                            if compact {
+                                body.push(compact_meter("credits", frac, right, width));
+                            } else {
+                                body.push(meter_line("credits", frac, right, width));
+                            }
+                        }
                     }
                     if !compact && snap.grok.local_sessions > 0 && line.is_some() {
                         body.push(item_line(
@@ -3076,17 +3101,19 @@ mod tests {
             assert_eq!(ls.xoff, 0);
         }
         // 'q' closes it back to the dashboard
-        assert!(handle_key(
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
-            &mut modal,
-            &mut next,
-            &cfg,
-            &snap,
-            &mut scroll,
-            &mut folded,
-            &mut Keymap::default(),
-        )
-        .is_ok());
+        assert!(
+            handle_key(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+                &mut modal,
+                &mut next,
+                &cfg,
+                &snap,
+                &mut scroll,
+                &mut folded,
+                &mut Keymap::default(),
+            )
+            .is_ok()
+        );
         assert!(modal.is_none());
     }
 
@@ -3506,7 +3533,6 @@ mod tests {
             .collect();
         assert!(txt.trim_end().ends_with("▼ 1 more"), "got: {txt:?}");
 
-
         // scrolling down clamps and shows both indicators
         let mut scroll = 9usize;
         term.draw(|f| draw_body(f, f.area(), &body, &mut scroll))
@@ -3515,6 +3541,39 @@ mod tests {
         assert_eq!(scroll, 1); // max_scroll = total(4) - viewport(3)
         let top_row: String = buf.content.iter().take(80).map(|c| c.symbol()).collect();
         assert!(top_row.trim_end().ends_with("▲"), "got: {top_row:?}");
+    }
+
+    #[test]
+    fn grok_section_renders_credits_bar() {
+        use ratatui::backend::TestBackend;
+
+        let mut snap = Snapshot::default();
+        snap.grok.used_pct = Some(42.0);
+        snap.grok.resets_at = Some("2026-08-22".into());
+        snap.grok.local_sessions = 1;
+        snap.grok.local_tokens = 1024;
+        // keep the other providers out of the way
+        snap.opencode_go.needs_key = true;
+        snap.openrouter.needs_key = true;
+
+        let cfg = crate::config::load();
+        let body = build_body(&cfg, &snap, CollapseState::default(), Keymap::default(), 80);
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let mut scroll = 0usize;
+        term.draw(|f| draw_body(f, f.area(), &body, &mut scroll))
+            .unwrap();
+
+        let txt: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(txt.contains("credits"), "grok credits label: {txt}");
+        assert!(txt.contains("42%"), "grok credits pct: {txt}");
+        assert!(txt.contains("2026-08-22"), "grok reset date: {txt}");
+        assert!(txt.contains("█"), "grok credits bar should render: {txt}");
     }
 
     #[test]
@@ -3723,7 +3782,19 @@ mod tests {
             ),
         ];
         let full: Vec<char> = segs.iter().flat_map(|(s, _)| s.chars()).collect();
-        for skip in [0usize, 1, 9, 10, 11, 17, 30, 60, 61, full.len(), full.len() + 5] {
+        for skip in [
+            0usize,
+            1,
+            9,
+            10,
+            11,
+            17,
+            30,
+            60,
+            61,
+            full.len(),
+            full.len() + 5,
+        ] {
             for width in [1usize, 4, 20, 60, 120] {
                 let l = slice_row(&segs, skip, width);
                 let out: String = l.spans.iter().map(|s| s.content.as_ref()).collect();

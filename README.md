@@ -15,7 +15,7 @@ runs standalone today and can be ported into any panel/plugin.
 | Codex           | `~/.codex/sessions` + `~/.codex/history.jsonl`                         |
 | OpenCode        | `~/.local/share/opencode/opencode.db` (SQLite sessions)                |
 | GitHub Copilot  | OAuth device flow + internal usage API (AI-credit quotas)              |
-| Grok (xAI)      | `~/.grok/auth.json` / `GROK_OAUTH_TOKEN` + billing proxy               |
+| Grok (xAI)      | `ub login grok` device flow (OS keyring) → CLI-proxy billing      |
 | OpenRouter      | `/credits` + `/key` API (balance, key-limit meter, daily/weekly/monthly spend) |
 | OpenCode Go     | official quota API `GET https://opencode.ai/zen/go/v1/usage` (rolling / weekly / monthly windows) |
 
@@ -63,7 +63,7 @@ ub status                   # one-shot text summary (for actions/scripts)
 ub status --json            # JSON snapshot
 ub watch --json             # same, via watch mode
 ub login copilot            # GitHub Copilot device flow (prints code, polls, saves token)
-ub login grok               # instructions (grok login / GROK_OAUTH_TOKEN)
+ub login grok               # device flow: browser link + code (no CLI install, saves to keyring)
 ub login openrouter         # paste an API key (sk-or-...)
 ub login opencode           # paste an OpenCode Go key (sk-...)
 ub logout                   # clear ALL saved tokens/keys
@@ -117,7 +117,7 @@ plus `countdown` / `reset_seconds` / `reset_at` for the daily window.
 | `q` / `x` / `Esc`| quit                                    |
 | `c`              | open the Connect menu (login / logout)  |
 | `l`              | start Copilot login                     |
-| `g`              | show Grok login instructions            |
+| `g`              | start Grok device login                 |
 | `o`              | open the OpenRouter request-log view    |
 | `r`              | refresh now (+ resync OpenRouter cache) |
 | `1`–`0`          | fold/unfold the section bound to that digit |
@@ -152,7 +152,17 @@ Config dir: `$HERDR_PLUGIN_CONFIG_DIR` or `~/.config/usage-bar`.
 | Copilot     | `secrets/copilot.json`      | — (device flow only)     |
 | OpenRouter  | `secrets/openrouter.json`   | `OPENROUTER_API_KEY`     |
 | OpenCode Go | `secrets/opencode-go.json`  | `OPENCODE_API_KEY`       |
-| Grok        | `~/.grok/auth.json`         | `GROK_OAUTH_TOKEN`       |
+| Grok        | `secrets/grok.json` (keyring, auto-refresh) | `GROK_OAUTH_TOKEN`  |
+|             | `~/.grok/auth.json` (Grok CLI fallback)        |                    |
+
+Grok no longer needs the Grok Build CLI. `ub login grok` runs xAI's standard
+OAuth **device flow** — it prints a link and a one-time code, you authorize in
+the browser, and usage-bar stores the access + refresh tokens in the keyring
+(`secrets/grok.json`). The access token is **refreshed automatically** near
+expiry via the refresh token. Tokens from an actual `grok login` CLI install
+(`~/.grok/auth.json`) and `GROK_OAUTH_TOKEN` remain supported as fallbacks and
+take precedence when no keyring token exists. `ub logout grok` clears the
+keyring copy only.
 
 OpenCode Go is also auto-detected from `~/.pi/agent/auth.json` (pi's
 credential store) and `~/.local/share/opencode/auth.json` when no key was

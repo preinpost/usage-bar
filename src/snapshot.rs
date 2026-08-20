@@ -22,7 +22,7 @@ pub fn snapshot(cfg: &Config) -> Snapshot {
         codex: data::collect_codex(start),
         opencode: data::collect_opencode(start),
         copilot: copilot::collect(cfg),
-        grok: grok::collect(start),
+        grok: grok::collect(cfg, start),
         opencode_go: opencode_go::collect(cfg),
         openrouter: openrouter::collect(cfg),
         or_usage: crate::openrouter::load(),
@@ -183,7 +183,10 @@ pub fn summarize(s: &Snapshot, cfg: &Config) -> String {
     // ---- Grok
     if show_all || g_active {
         if s.grok.needs_login {
-            let _ = write!(out, "Grok — needs 'grok login' or GROK_OAUTH_TOKEN\n");
+            let _ = write!(
+                out,
+                "Grok — needs device login ('ub login grok') or GROK_OAUTH_TOKEN\n"
+            );
         } else if let Some(e) = &s.grok.error {
             let _ = write!(out, "Grok — error ({e})\n");
         } else if let Some(p) = s.grok.used_pct {
